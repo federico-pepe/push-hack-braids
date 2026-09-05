@@ -39,13 +39,17 @@ jobs:
           # must land inside it (/work/push-braids-host) — a path like
           # /work/../dist resolves inside the container's own root, not
           # the host, and silently produces nothing there.
+          # chmod happens inside the container (still root there) — the
+          # build output is root-owned from the container's point of
+          # view, and the (non-root) runner user can't chmod a file it
+          # doesn't own on the host side afterward.
           docker run --rm --platform linux/amd64 \
             -v "$PWD/src":/work -w /work golang:1.25-bookworm \
             sh -c "apt-get update -qq && apt-get install -qq -y libasound2-dev >/dev/null && \
-              CGO_ENABLED=1 go build -ldflags '-s -w -linkmode external -extldflags -Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2' -o /work/push-braids-host ."
+              CGO_ENABLED=1 go build -ldflags '-s -w -linkmode external -extldflags -Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2' -o /work/push-braids-host . && \
+              chmod +x /work/push-braids-host"
           mv src/push-braids-host dist/push-braids-host/push-braids-host
           cp hack.json dist/push-braids-host/hack.json
-          chmod +x dist/push-braids-host/push-braids-host
 
       - name: Package
         run: tar -czf push-braids-host.tar.gz -C dist push-braids-host
