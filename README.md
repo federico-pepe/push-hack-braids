@@ -49,12 +49,12 @@ docker run --rm --platform linux/amd64 -v "$PWD":/build -w /build debian:bullsey
 Then, after installing this hack via the catalog:
 
 ```bash
-ssh root@push.local 'mkdir -p /data/push-hack/hacks/push-braids-host/module/presets'
+ssh root@push.local 'mkdir -p /data/push-hack/hacks/push-braids/module/presets'
 scp path/to/schwung-braids-main/build/dsp.so \
-  root@push.local:/data/push-hack/hacks/push-braids-host/dsp.so
+  root@push.local:/data/push-hack/hacks/push-braids/dsp.so
 scp path/to/schwung-braids-main/src/presets/*.braids \
-  root@push.local:/data/push-hack/hacks/push-braids-host/module/presets/
-ssh root@push.local '/etc/init.d/push-hack-push-braids-host restart'
+  root@push.local:/data/push-hack/hacks/push-braids/module/presets/
+ssh root@push.local '/etc/init.d/push-hack-push-braids restart'
 ```
 
 To actually hear it: an audio track in Live's own Set, Input = "Push Hack
@@ -89,7 +89,7 @@ highlighted row. A change applies immediately (MIDI resubscribes, the
 audio device reopens if needed) and is saved to `braids-config.json`, so
 it survives a restart. Picking the wrong MIDI port breaks Shift+Device
 itself (no pad/button events reach this hack at all) — if that happens,
-edit `/data/push-hack/hacks/push-braids-host/braids-config.json` directly
+edit `/data/push-hack/hacks/push-braids/braids-config.json` directly
 over SSH and restart the service.
 
 ## Persistent install

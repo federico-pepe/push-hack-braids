@@ -1,4 +1,4 @@
-BINARY    := push-braids-host
+BINARY    := push-braids
 REPO_ROOT := $(abspath $(CURDIR))
 DOCKER    := docker run --rm --platform linux/amd64 \
                -v "$(REPO_ROOT)":/work -w /work/src \

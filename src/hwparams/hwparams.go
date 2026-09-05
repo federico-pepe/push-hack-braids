@@ -1,8 +1,8 @@
 // Package hwparams parses Live's negotiated ALSA hw_params off /proc, so
-// push-braids-host's PCM device can be reopened with the channels/rate/
+// push-braids's PCM device can be reopened with the channels/rate/
 // period/buffer Live actually asked for, instead of a value someone
 // guessed and hardcoded. Kept free of cgo so it's plain-Go testable on any
-// host (see hwparams_test.go's fixtures) — push-braids-host itself needs
+// host (see hwparams_test.go's fixtures) — push-braids itself needs
 // cgo (dlopen + libasound) and can only be built/tested via Docker.
 package hwparams
 

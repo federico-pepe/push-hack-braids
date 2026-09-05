@@ -1,4 +1,4 @@
-// push-braids-host — a Push3 standalone host proving the audio+MIDI+DSP
+// push-braids — a Push3 standalone host proving the audio+MIDI+DSP
 // chain end to end: reads pad/button MIDI straight off Push3's own ALSA
 // sequencer port (the same port push-manager/automation/keyboard-visualizer
 // already subscribe to, via the shared core/alsaseq package), feeds Note

@@ -111,7 +111,7 @@ func toggleUI(pmURL string, st *paramState, io *ioState) {
 		if err := client.PushImage(renderParamPage(st, io)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
-		log.Printf("push-braids-host: UI ON (Shift+Device) — MIDI intercept enabled")
+		log.Printf("push-braids: UI ON (Shift+Device) — MIDI intercept enabled")
 	} else {
 		if err := client.SetMode(0); err != nil {
 			log.Printf("display: disable takeover: %v", err)
@@ -119,7 +119,7 @@ func toggleUI(pmURL string, st *paramState, io *ioState) {
 		if err := client.SetMidiFilter(false); err != nil {
 			log.Printf("display: disable midi filter: %v", err)
 		}
-		log.Printf("push-braids-host: UI OFF (Shift+Device) — MIDI intercept disabled")
+		log.Printf("push-braids: UI OFF (Shift+Device) — MIDI intercept disabled")
 	}
 }
 

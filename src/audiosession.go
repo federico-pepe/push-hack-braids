@@ -12,7 +12,7 @@ import (
 	"time"
 	"unsafe"
 
-	"push-braids-host/hwparams"
+	"push-braids/hwparams"
 )
 
 // audioSession owns one open PCM handle and the goroutine rendering into
@@ -229,7 +229,7 @@ func (e *bridgeError) Error() string { return e.what + ": " + e.msg }
 // side, and (re)opens an audioSession whenever the negotiated params (or
 // the target device) change — continuously, for the process's life, so
 // Live restarting mid-session with different params is handled the same
-// way as the very first negotiation. push-braids-host waits on
+// way as the very first negotiation. push-braids waits on
 // push-audio-loopback's effect on kernel/ALSA state here, not on its
 // process, because catalog's `requires` only orders installation, not
 // boot-time service start order (see catalog/schema.md).

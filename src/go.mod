@@ -1,4 +1,4 @@
-module push-braids-host
+module push-braids
 
 go 1.25.0
 
