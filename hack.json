@@ -2,7 +2,7 @@
   "id": "push-braids",
   "name": "Braids",
   "description": "Macro oscillator module based on Mutable Instruments Braids by Emilie Gillet, ported from Schwung DSP. Reads Push 3's own pad MIDI and renders audio into push-audio-loopback's virtual card. On-screen I/O picker (Shift+Device, page 3) lets you pick which MIDI port to read, which audio device to render to, and which channel pair. Needs push-audio-loopback (waits for it at startup and after every restart) and push-manager + push-display for its on-screen controls.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "federico-pepe",
   "binary": "push-braids",
   "enabled": true

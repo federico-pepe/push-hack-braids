@@ -13,49 +13,31 @@ picker for which MIDI port / audio device / channel pair to use — see
 "On-screen controls" below.
 
 Install via [Push Hack Catalog](https://github.com/federico-pepe/ableton-push-hack/tree/main/catalog),
-the on-device installer built into every push-hack setup. Requires
-`push-hack-audio-loopback` (installed automatically first if missing) and
-`push-manager` + `push-display` (part of the base push-hack setup) for its
-on-screen controls.
+the on-device installer built into every push-hack setup. Fully
+self-contained — the Braids DSP plugin and its presets ship in the
+release, no manual copy step. Requires `push-hack-audio-loopback`
+(installed automatically first if missing) and `push-manager` +
+`push-display` (part of the base push-hack setup) for its on-screen
+controls.
 
 ## Build
 
 ```bash
-make        # cross-builds via Docker golang:1.25-bookworm, needs libasound2-dev
+make        # builds both the Go binary (cgo, via Docker) and dsp.so (native x86_64, via Docker)
 ```
 
-cgo (dlopen + libasound) means this can't cross-compile with a plain
-`go build`.
+cgo (dlopen + libasound) means the Go binary can't cross-compile with a
+plain `go build`. `dsp.so` is portable C++ with no ARM-specific code, so
+it builds native x86_64 in a plain container — no cross toolchain needed.
 
-## Build the Braids DSP plugin
+## The Braids DSP plugin
 
-The DSP plugin itself (`dsp.so`) is a separate project, not bundled here —
-build it and copy it in after install:
-
-```bash
-cd path/to/schwung-braids-main
-mkdir -p build
-docker run --rm --platform linux/amd64 -v "$PWD":/build -w /build debian:bullseye sh -c '
-  apt-get update -qq && apt-get install -qq -y g++ >/dev/null
-  BRAIDS_SRCS="src/dsp/braids/macro_oscillator.cc src/dsp/braids/analog_oscillator.cc \
-    src/dsp/braids/digital_oscillator.cc src/dsp/braids/resources.cc \
-    src/dsp/braids/quantizer.cc src/dsp/stmlib/utils/random.cc"
-  for s in $BRAIDS_SRCS; do g++ -O3 -fPIC -std=c++14 -DTEST -Isrc/dsp -c "$s" -o "build/$(basename "$s" .cc).o"; done
-  g++ -O3 -fPIC -std=c++14 -DTEST -Isrc/dsp -c src/dsp/braids_plugin.cpp -o build/braids_plugin.o
-  g++ -shared build/*.o -o build/dsp.so -lm
-'
-```
-
-Then, after installing this hack via the catalog:
-
-```bash
-ssh root@push.local 'mkdir -p /data/push-hack/hacks/push-braids/module/presets'
-scp path/to/schwung-braids-main/build/dsp.so \
-  root@push.local:/data/push-hack/hacks/push-braids/dsp.so
-scp path/to/schwung-braids-main/src/presets/*.braids \
-  root@push.local:/data/push-hack/hacks/push-braids/module/presets/
-ssh root@push.local '/etc/init.d/push-hack-push-braids restart'
-```
+`third_party/braids/` vendors the DSP source this hack hosts — the
+Braids macro oscillator engine by Emilie Gillet (Mutable Instruments),
+via its Move Everything port by Charles Vestal — both MIT-licensed, see
+`third_party/braids/THIRD_PARTY_LICENSES.md`. `make` (or the release
+workflow) builds it into `dsp.so` and bundles it with its presets in the
+release tarball, so a catalog install needs no manual step.
 
 To actually hear it: an audio track in Live's own Set, Input = "Push Hack
 Virtual Audio", Monitor = In, routed to Master. Pressing a pad on Push3
@@ -113,9 +95,6 @@ and needs no manual steps after a reboot:
 
 ## Known limits
 
-- The DSP plugin (`dsp.so`) and its presets aren't installed by the
-  catalog yet — copy them in by hand once, per "Build the Braids DSP
-  plugin" above.
 - Beyond the 8 encoders, D-Pad (param/I-O pages), and Note On/Off (pad
   grid), no other MIDI is wired up — pitch bend and aftertouch are
   ignored.

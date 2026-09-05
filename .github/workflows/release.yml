@@ -51,6 +51,25 @@ jobs:
           mv src/push-braids dist/push-braids/push-braids
           cp hack.json dist/push-braids/hack.json
 
+      # third_party/braids/ is vendored, MIT-licensed source (see its own
+      # THIRD_PARTY_LICENSES.md) — portable C++ with no ARM-specific code,
+      # so it builds native x86_64 in a plain Debian container, same as
+      # the local Makefile's build-dsp target.
+      - name: Build DSP plugin (native x86_64, via Docker)
+        run: |
+          mkdir -p build dist/push-braids/module/presets
+          docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work debian:bullseye sh -c '
+            apt-get update -qq && apt-get install -qq -y g++ >/dev/null
+            BRAIDS_SRCS="third_party/braids/dsp/braids/macro_oscillator.cc third_party/braids/dsp/braids/analog_oscillator.cc \
+              third_party/braids/dsp/braids/digital_oscillator.cc third_party/braids/dsp/braids/resources.cc \
+              third_party/braids/dsp/braids/quantizer.cc third_party/braids/dsp/stmlib/utils/random.cc"
+            for s in $BRAIDS_SRCS; do g++ -O3 -fPIC -std=c++14 -DTEST -Ithird_party/braids/dsp -c "$s" -o "build/$(basename "$s" .cc).o"; done
+            g++ -O3 -fPIC -std=c++14 -DTEST -Ithird_party/braids/dsp -c third_party/braids/dsp/braids_plugin.cpp -o build/braids_plugin.o
+            g++ -shared build/*.o -o dsp.so -lm
+          '
+          cp dsp.so dist/push-braids/dsp.so
+          cp third_party/braids/presets/*.braids dist/push-braids/module/presets/
+
       - name: Package
         run: tar -czf push-braids.tar.gz -C dist push-braids
 
