@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version match
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MODULE_VERSION=$(grep '"version"' hack.json | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+          if [ "$TAG_VERSION" != "$MODULE_VERSION" ]; then
+            echo "ERROR: Tag version ($TAG_VERSION) does not match hack.json version ($MODULE_VERSION)"
+            echo "Update hack.json to version $TAG_VERSION before tagging."
+            exit 1
+          fi
+          echo "Version check passed: $TAG_VERSION"
+
+      # cgo (dlopen + libasound) needs a real linux/amd64 environment with
+      # libasound2-dev, not the plain CGO_ENABLED=0 recipe most push-hack
+      # modules use — actions/setup-go + a bare `go build` here would
+      # dynamically link against the runner's own glibc and fail to exec
+      # on Push 3's AbletonOS. Build inside the same Docker image the
+      # Makefile uses for local builds.
+      - name: Build (cgo, via Docker)
+        run: |
+          mkdir -p dist/push-braids-host
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/src":/work -w /work golang:1.25-bookworm \
+            sh -c "apt-get update -qq && apt-get install -qq -y libasound2-dev >/dev/null && \
+              CGO_ENABLED=1 go build -ldflags '-s -w -linkmode external -extldflags -Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2' -o /work/../dist/push-braids-host/push-braids-host ."
+          cp hack.json dist/push-braids-host/hack.json
+          chmod +x dist/push-braids-host/push-braids-host
+
+      - name: Package
+        run: tar -czf push-braids-host.tar.gz -C dist push-braids-host
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: push-braids-host.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit release.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git fetch origin main
+          git checkout -f main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cat > release.json << EOF
+          {
+            "version": "${VERSION}",
+            "download_url": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/push-braids-host.tar.gz",
+            "released_at": "${RELEASED_AT}"
+          }
+          EOF
+          git add release.json
+          git commit -m "chore: update release.json for ${{ github.ref_name }}" || echo "No changes to commit"
+          git push origin main
