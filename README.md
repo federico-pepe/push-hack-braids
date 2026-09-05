@@ -3,8 +3,8 @@
 A [push-hack](https://github.com/federico-pepe/ableton-push-hack) module for
 Ableton Push 3. A standalone DSP host: reads pad/button MIDI straight off
 Push3's own ALSA sequencer, feeds notes into a Move Anything `plugin_api_v2`
-DSP module (Braids, a Mutable Instruments macro-oscillator port), and writes
-the rendered audio into
+DSP module — Braids, the macro oscillator by Emilie Gillet (Mutable
+Instruments), ported from Schwung DSP — and writes the rendered audio into
 [push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)'s
 virtual sound card.
 
