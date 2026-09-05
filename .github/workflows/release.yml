@@ -35,10 +35,15 @@ jobs:
       - name: Build (cgo, via Docker)
         run: |
           mkdir -p dist/push-braids-host
+          # Only src/ is mounted into the container, so the build output
+          # must land inside it (/work/push-braids-host) — a path like
+          # /work/../dist resolves inside the container's own root, not
+          # the host, and silently produces nothing there.
           docker run --rm --platform linux/amd64 \
             -v "$PWD/src":/work -w /work golang:1.25-bookworm \
             sh -c "apt-get update -qq && apt-get install -qq -y libasound2-dev >/dev/null && \
-              CGO_ENABLED=1 go build -ldflags '-s -w -linkmode external -extldflags -Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2' -o /work/../dist/push-braids-host/push-braids-host ."
+              CGO_ENABLED=1 go build -ldflags '-s -w -linkmode external -extldflags -Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2' -o /work/push-braids-host ."
+          mv src/push-braids-host dist/push-braids-host/push-braids-host
           cp hack.json dist/push-braids-host/hack.json
           chmod +x dist/push-braids-host/push-braids-host
 
