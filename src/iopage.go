@@ -24,10 +24,15 @@ type ioRowKind int
 
 const (
 	ioRowHeader ioRowKind = iota
+	ioRowInfo             // non-selectable, e.g. "Braids MIDI In" note
 	ioRowMidi
 	ioRowDevice
 	ioRowChannel
 )
+
+// selectable reports whether a row is a real pickable option (skip headers
+// and info rows when moving the cursor).
+func (k ioRowKind) selectable() bool { return k != ioRowHeader && k != ioRowInfo }
 
 // loopbackChannels is push-audio-loopback's fixed channel count (see that
 // hack's README) — used only to offer a full range of channel pairs here,
@@ -77,6 +82,7 @@ func (io *ioState) buildRows() []ioRow {
 
 	var rows []ioRow
 	rows = append(rows, ioRow{kind: ioRowHeader, label: "MIDI INPUT"})
+	rows = append(rows, ioRow{kind: ioRowInfo, label: fmt.Sprintf("  %s — always open for external gear/Live", braidsMIDIPortName)})
 	ports, _ := alsaseq.EnumPorts(alsaseq.CapRead)
 	for _, p := range ports {
 		if p.Addr.Client != alsaseq.Push3ClientDefault {
@@ -133,7 +139,7 @@ func (io *ioState) refreshLocked() {
 	if io.cursor < 0 {
 		io.cursor = 0
 	}
-	if n > 0 && io.rows[io.cursor].kind == ioRowHeader {
+	for i := 0; n > 0 && !io.rows[io.cursor].kind.selectable() && i < n; i++ {
 		io.cursor = (io.cursor + 1) % n
 	}
 }
@@ -155,7 +161,7 @@ func (io *ioState) moveCursor(delta int) {
 	}
 	for i := 0; i < n; i++ {
 		io.cursor = (io.cursor + dir + n) % n
-		if io.rows[io.cursor].kind != ioRowHeader {
+		if io.rows[io.cursor].kind.selectable() {
 			break
 		}
 	}
@@ -163,7 +169,7 @@ func (io *ioState) moveCursor(delta int) {
 
 // commit applies the currently highlighted row to sharedConfig and
 // persists it to braids-config.json. Applying it live (rather than only
-// on the next process start) is what lets watchHWParams/watchMIDI pick it
+// on the next process start) is what lets watchHWParams/watchBraidsPort pick it
 // up on their next poll tick with no restart.
 func (io *ioState) commit() {
 	io.mu.Lock()
@@ -201,11 +207,14 @@ func (io *ioState) render() *image.NRGBA {
 
 	rows := make([]widgets.ListRow, len(io.rows))
 	for i, r := range io.rows {
-		if r.kind == ioRowHeader {
+		switch r.kind {
+		case ioRowHeader:
 			rows[i] = widgets.ListRow{Text: "-- " + r.label + " --", TextCol: widgets.Default.Gray}
-			continue
+		case ioRowInfo:
+			rows[i] = widgets.ListRow{Text: r.label, TextCol: widgets.Default.Gray}
+		default:
+			rows[i] = widgets.ListRow{Text: r.label, TextCol: widgets.Default.White}
 		}
-		rows[i] = widgets.ListRow{Text: r.label, TextCol: widgets.Default.White}
 	}
 
 	visRows := (screenH - ioRowH) / ioRowH

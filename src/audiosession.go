@@ -9,6 +9,7 @@ import "C"
 import (
 	"log"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -224,6 +225,37 @@ type bridgeError struct {
 
 func (e *bridgeError) Error() string { return e.what + ": " + e.msg }
 
+// audioStatus is watchHWParams' live readiness state. display.go reads it
+// to pick real UI vs blocking "not ready" screen — no point drawing knobs
+// when nothing's rendering audio yet.
+type audioStatus struct {
+	mu    sync.Mutex
+	ready bool
+	msg   string // reason, only meaningful when !ready
+}
+
+func (s *audioStatus) set(ready bool, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready, s.msg = ready, msg
+}
+
+func (s *audioStatus) get() (ready bool, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ready, s.msg
+}
+
+// 2 actionable "not ready" reasons — card missing, or Live hasn't opened
+// it (README's "To actually hear it" has the exact Live-side steps).
+const msgWaitingForCard = "Loopback Audio driver not loaded.\nInstall/enable push-audio-loopback."
+const msgWaitingForLive = "1. Go to Push Audio Settings.\n" +
+	"2. Select Devices.\n" +
+	"3. Enable one input on \"Push Hack Virtual Audio PCM\".\n" +
+	"4. Select an audio track.\n" +
+	"5. Set the track's input to the input you enabled in Devices.\n" +
+	"6. Turn on Monitor In."
+
 // watchHWParams is the top-level audio supervisor: it waits for
 // push-audio-loopback's card to exist, waits for Live to actually open its
 // side, and (re)opens an audioSession whenever the negotiated params (or
@@ -234,7 +266,8 @@ func (e *bridgeError) Error() string { return e.what + ": " + e.msg }
 // process, because catalog's `requires` only orders installation, not
 // boot-time service start order (see catalog/schema.md).
 func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
-	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState, shutdown <-chan struct{}) {
+	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState,
+	status *audioStatus, shutdown <-chan struct{}) {
 
 	var sess *audioSession
 	var lastParams hwparams.Params
@@ -268,6 +301,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 
 		if !cardPresent(cardID) {
 			logTransition("waiting for " + cardID + " (push-audio-loopback not loaded yet)")
+			status.set(false, msgWaitingForCard)
 			stopSession()
 			if !sleepOrStop(waitPollInterval, shutdown) {
 				return
@@ -278,6 +312,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 		hp, ok, err := hwparams.Read(cardID)
 		if err != nil {
 			log.Printf("reading hw_params for %s: %v", cardID, err)
+			status.set(false, msgWaitingForLive)
 			stopSession()
 			if !sleepOrStop(waitPollInterval, shutdown) {
 				return
@@ -286,6 +321,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 		}
 		if !ok {
 			logTransition("waiting for Live to open " + cardID + "...")
+			status.set(false, msgWaitingForLive)
 			stopSession()
 			if !sleepOrStop(waitPollInterval, shutdown) {
 				return
@@ -299,6 +335,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 			newSess, err := startAudioSession(plugin, device, hp, midiCh, ctlCh, params, io, rt)
 			if err != nil {
 				log.Printf("opening PCM %s: %v — will retry", device, err)
+				status.set(false, msgWaitingForLive)
 				if !sleepOrStop(waitPollInterval, shutdown) {
 					return
 				}
@@ -309,6 +346,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 			lastParams = hp
 			lastDevice = device
 			logTransition("running")
+			status.set(true, "")
 		}
 
 		if !sleepOrStop(steadyPollInterval, shutdown) {

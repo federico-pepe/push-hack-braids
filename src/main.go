@@ -84,11 +84,13 @@ var defaultParams = [][2]string{
 // channel; every bridge_plugin_* call happens on the render goroutine,
 // which drains this channel first.
 type midiHandler struct {
-	out    chan<- [3]byte
-	ctl    chan<- controlEvent
-	pmURL  string
-	params *paramState
-	io     *ioState
+	out     chan<- [3]byte
+	ctl     chan<- controlEvent
+	pmURL   string
+	params  *paramState
+	io      *ioState
+	astatus *audioStatus
+	rt      *sharedConfig
 }
 
 // controlEvent is a CC-derived UI action decoded on the ALSA read-loop
@@ -107,7 +109,15 @@ type controlEvent struct {
 }
 
 func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
+	fromPush3 := src.Client == alsaseq.Push3ClientDefault
+
 	if evType == alsaseq.EvController {
+		// Only Push3's own default port drives the on-screen controls —
+		// merging everything onto one port means CC could otherwise arrive
+		// from any external client connected to it too.
+		if !fromPush3 || src.Port != alsaseq.Push3PortDefault {
+			return
+		}
 		// Push's own control-surface CCs (encoders, D-Pad, screen buttons)
 		// are always channel 0. Every other channel carries per-pad MPE
 		// expression from the pad grid — Push 3 assigns each held pad its
@@ -127,7 +137,7 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		val := uint8(binary.LittleEndian.Uint32(data[8:]) & 0x7F)
 
 		if cc == ccShift || cc == ccDevice {
-			onChordCC(cc, val, h.pmURL, h.params, h.io)
+			onChordCC(cc, val, h.pmURL, h.params, h.io, h.astatus)
 			return
 		}
 
@@ -165,20 +175,28 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 	default:
 		return
 	}
+
+	if fromPush3 {
+		// Only count Push3's own notes while the I/O picker still points
+		// at the port they arrived on — switching it elsewhere quiets
+		// Push3's own pads instead of double-triggering both sources.
+		curClient, curPort := h.rt.getMIDI()
+		if src.Client != curClient || src.Port != curPort {
+			return
+		}
+		// Push3's own touch-sensitive controls (encoder touch = notes 0-7,
+		// D-Pad center touch = note 13, etc. — docs/push3-button-map.md)
+		// send real Note On/Off outside the pad grid's 36-99 range —
+		// reject those, only the pad grid should trigger a voice. External
+		// gear isn't Push3 hardware, so it isn't range-limited this way.
+		if data[1] < 36 || data[1] > 99 {
+			return
+		}
+	}
+
 	channel := data[0] & 0x0F
 	note := data[1]
 	velocity := data[2]
-
-	// Push's own touch-sensitive controls (encoder touch = notes 0-7, D-Pad
-	// center touch = note 13, etc. — docs/push3-button-map.md) send real
-	// Note On/Off outside the pad grid's 36-99 range. Forwarding those to
-	// Braids played them as low, unwanted notes on every encoder touch —
-	// the reported "noise when touching encoders." Only the pad grid
-	// should ever trigger a voice.
-	if note < 36 || note > 99 {
-		return
-	}
-
 	msg := [3]byte{status | channel, note, velocity}
 
 	select {
@@ -191,34 +209,6 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 func (h *midiHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {
 	// SysEx etc. — not relevant to a sound-generator module, ignored.
 }
-
-// notesOnlyHandler and controlsOnlyHandler split midiHandler's one Fixed
-// implementation across the two independent ALSA seq subscriptions
-// watchMIDI now runs (see midisession.go's package doc): one pinned
-// permanently to Push3's own port for on-screen-control traffic, one
-// retargetable by the I/O picker for note input. Both still funnel into
-// the same midiHandler.Fixed, which already tells the two kinds of event
-// apart by content (evType, then channel/note-range) — these wrappers just
-// gate which subscription is allowed to feed it which kind, so picking a
-// different note-input source can never also take Push3's own encoders/
-// D-Pad/screen buttons down with it.
-type notesOnlyHandler struct{ inner *midiHandler }
-
-func (h notesOnlyHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
-	if evType == alsaseq.EvNoteOn || evType == alsaseq.EvNoteOff {
-		h.inner.Fixed(evType, src, data)
-	}
-}
-func (h notesOnlyHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {}
-
-type controlsOnlyHandler struct{ inner *midiHandler }
-
-func (h controlsOnlyHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
-	if evType == alsaseq.EvController {
-		h.inner.Fixed(evType, src, data)
-	}
-}
-func (h controlsOnlyHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {}
 
 func main() {
 	// A catalog install only ever respawns this process by restarting the
@@ -364,20 +354,21 @@ func runSupervised() {
 	}
 	params := newParamState(metas)
 
-	// rt is persistedConfig's live counterpart: watchMIDI/watchHWParams act
-	// on it, and the on-screen I/O page (page 3, Shift+Device then D-Pad
+	// rt is persistedConfig's live counterpart: watchBraidsPort/watchHWParams
+	// act on it, and the on-screen I/O page (page 3, Shift+Device then D-Pad
 	// Right twice) writes to it when the user picks a different port or
 	// device — no process restart needed, and it's saved back to
 	// braids-config.json right after (see iopage.go's commit).
 	rt := newSharedConfig(cfg)
 	io := newIOState(hackDir, rt)
+	astatus := &audioStatus{msg: msgWaitingForCard} // starting guess till watchHWParams' 1st check
 
 	go runDependencyWatcher(pmURL)
-	go runDisplayLoop(pmURL, params, io)
+	go runDisplayLoop(pmURL, params, io, astatus)
 
 	midiCh := make(chan [3]byte, 256)
 	ctlCh := make(chan controlEvent, 64)
-	handler := &midiHandler{out: midiCh, ctl: ctlCh, pmURL: pmURL, params: params, io: io}
+	handler := &midiHandler{out: midiCh, ctl: ctlCh, pmURL: pmURL, params: params, io: io, astatus: astatus, rt: rt}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -388,13 +379,9 @@ func runSupervised() {
 		close(shutdown)
 	}()
 
-	// MIDI: two independent subscriptions (see midisession.go's package
-	// doc). Notes follow whatever rt's current source is and re-subscribe
-	// whenever the I/O picker changes it; Push3's own encoders/D-Pad/screen
-	// buttons always come from Push3's own port, regardless of that choice.
-	go watchMIDI(rt, "pad/button note input", notesOnlyHandler{handler}, shutdown)
-	go watchMIDI(fixedMIDISource{alsaseq.Push3ClientDefault, alsaseq.Push3PortDefault},
-		"on-screen control surface", controlsOnlyHandler{handler}, shutdown)
+	// One port, see midisession.go doc: pinned Push3 control surface +
+	// notes, picker-retargetable notes, and always open for external gear.
+	go watchBraidsPort(rt, handler, shutdown)
 
 	// The audio session itself — PCM open/close, channels/rate/period —
 	// is fully owned by this supervisor loop, which blocks until shutdown
@@ -402,7 +389,7 @@ func runSupervised() {
 	// value someone guessed and hardcoded, and reopens whenever those
 	// params (or the user's chosen PCM device, via rt) change. See
 	// audiosession.go.
-	watchHWParams(cardID, rt, plugin, midiCh, ctlCh, params, io, shutdown)
+	watchHWParams(cardID, rt, plugin, midiCh, ctlCh, params, io, astatus, shutdown)
 
 	// Best-effort: leaving push-manager's MIDI intercept or display
 	// takeover stuck on after this process exits would silently block pad

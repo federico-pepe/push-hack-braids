@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"image"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +47,10 @@ var (
 // knob for a plain 0-1 float param, or a plain centered readout for an
 // enum ("engine") — DrawKnob's numeric center doesn't fit a shape name, so
 // that one slot draws differently.
-func renderParamPage(st *paramState, io *ioState) *image.NRGBA {
+func renderParamPage(st *paramState, io *ioState, astatus *audioStatus) *image.NRGBA {
+	if ready, msg := astatus.get(); !ready {
+		return renderWaitingScreen(msg)
+	}
 	if st.IsIOPage() {
 		return io.render()
 	}
@@ -153,11 +157,27 @@ func renderPatchPage(st *paramState) *image.NRGBA {
 	return img
 }
 
+// renderWaitingScreen is the "not ready" OSD: full black screen, no knobs —
+// shown instead of the real param UI whenever astatus.get() reports not
+// ready, so Shift+Device never shows controls for a session with no audio
+// running yet. msg may be multi-line (\n-separated).
+func renderWaitingScreen(msg string) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, screenW, screenH))
+	gfx.FillRect(img, 0, 0, screenW, screenH, widgets.Default.Black)
+	text.DrawScaled(img, 8, 26, 2, "Braids not ready - setup needed", widgets.Default.White)
+	y := 46
+	for _, line := range strings.Split(msg, "\n") {
+		text.Draw(img, 8, y, line, widgets.Default.Gray)
+		y += 16
+	}
+	return img
+}
+
 // toggleUI flips the on-screen param UI: entering takeover mode, enabling
 // push-manager's MIDI intercept (so pad hits stop reaching Live while this
 // UI reads them as controls, not notes), and forcing an immediate frame —
 // or releasing both back to the native Push UI / normal Live routing.
-func toggleUI(pmURL string, st *paramState, io *ioState) {
+func toggleUI(pmURL string, st *paramState, io *ioState, astatus *audioStatus) {
 	uiMu.Lock()
 	uiOn = !uiOn
 	on := uiOn
@@ -171,7 +191,7 @@ func toggleUI(pmURL string, st *paramState, io *ioState) {
 		if err := client.SetMidiFilter(true); err != nil {
 			log.Printf("display: enable midi filter: %v", err)
 		}
-		if err := client.PushImage(renderParamPage(st, io)); err != nil {
+		if err := client.PushImage(renderParamPage(st, io, astatus)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
 		log.Printf("push-braids: UI ON (Shift+Device) — MIDI intercept enabled")
@@ -196,18 +216,27 @@ func shutdownUI(pmURL string) {
 	_ = client.SetMidiFilter(false)
 }
 
-// runDisplayLoop redraws only when the UI is on and an encoder turn or
-// page flip marked the state dirty — polled at ~30fps, the same rate
+// runDisplayLoop redraws when the UI is on and either an encoder turn/page
+// flip marked the state dirty, or astatus's readiness flipped — the latter
+// needs its own check since it changes with no encoder event at all (Live
+// opening the loopback card mid-session), polled at ~30fps, the same rate
 // keyboard-visualizer's own render loop uses.
-func runDisplayLoop(pmURL string, st *paramState, io *ioState) {
+func runDisplayLoop(pmURL string, st *paramState, io *ioState, astatus *audioStatus) {
 	client := pmclient.New(pmURL)
 	ticker := time.NewTicker(33 * time.Millisecond)
 	defer ticker.Stop()
+	lastReady := false
 	for range ticker.C {
 		st.mu.Lock()
 		dirty := st.dirty
 		st.dirty = false
 		st.mu.Unlock()
+
+		ready, _ := astatus.get()
+		if ready != lastReady {
+			lastReady = ready
+			dirty = true
+		}
 
 		uiMu.Lock()
 		on := uiOn
@@ -216,7 +245,7 @@ func runDisplayLoop(pmURL string, st *paramState, io *ioState) {
 		if !on || !dirty {
 			continue
 		}
-		if err := client.PushImage(renderParamPage(st, io)); err != nil {
+		if err := client.PushImage(renderParamPage(st, io, astatus)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
 	}

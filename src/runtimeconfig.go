@@ -3,7 +3,7 @@ package main
 import "sync"
 
 // sharedConfig is persistedConfig's live, in-memory counterpart: the
-// values watchMIDI/watchHWParams actually act on, and the on-screen I/O
+// values watchBraidsPort/watchHWParams actually act on, and the on-screen I/O
 // page (iopage.go) writes to when the user picks a new port/device.
 // Changing it takes effect on those supervisors' next poll tick — no
 // process restart needed — and iopage.go persists it to braids-config.json

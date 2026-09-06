@@ -1,19 +1,17 @@
 package main
 
-// midisession.go — owns the MIDI subscription lifecycles, so the on-screen
-// I/O page (iopage.go) can retarget the note-input source at a different
-// ALSA seq source without a process restart. Mirrors audiosession.go's
-// watchHWParams/startAudioSession split: a supervisor loop that opens,
-// tears down, and reopens as its target changes.
+// midisession.go — one ALSA seq port, "Braids MIDI In", for everything:
+// Push3's on-screen controls, the I/O picker's note source, and any
+// external gear/Live connecting in directly. Content-based filtering (by
+// src address) in main.go's midiHandler.Fixed sorts out which event goes
+// where — see that function's comments.
 //
-// Two independent subscriptions run side by side: the I/O picker's choice
-// only ever retargets the notes one. Push3's own on-screen-control traffic
-// (encoders, D-Pad, screen buttons) always comes from Push3's own ALSA seq
-// port — main.go wraps handler so each subscription only feeds it the kind
-// of event it owns (see notesOnlyHandler/controlsOnlyHandler). Without that
-// split, picking a different note-input port used to take Push3's own
-// control surface down with it, since both used to ride the one
-// subscription being retargeted.
+// Single persistent port instead of separate ones per role: this used to
+// be 3 ports (2 "Push Braids In" + 1 "Braids MIDI In"), all 3 showing up
+// as separate entries in Live's MIDI picker. ALSA's CapSubsWrite and
+// NO_EXPORT bits (tried in that order) don't stop Live from listing a
+// port — confirmed on hardware, twice. One real port is the only way to
+// have one entry.
 
 import (
 	"log"
@@ -21,34 +19,29 @@ import (
 	"github.com/federico-pepe/ableton-push-hack/core/alsaseq"
 )
 
-// midiSource is the minimal interface watchMIDI needs to find its target:
-// *sharedConfig (retargetable by the I/O page) satisfies it directly, and
-// fixedMIDISource lets the always-on control-surface subscription reuse
-// the same connect/retry loop with a target that never changes.
-type midiSource interface {
-	getMIDI() (client, port byte)
-}
+// braidsMIDIPortName — this hack's one MIDI port. iopage.go shows the same
+// name in the I/O picker.
+const braidsMIDIPortName = "Braids MIDI In"
 
-// fixedMIDISource is a midiSource that never changes — used to pin the
-// control-surface subscription to Push3's own port regardless of whatever
-// the I/O picker has the note-input source set to.
-type fixedMIDISource struct{ client, port byte }
+// watchBraidsPort opens the port once (retries on failure) and keeps
+// pulling from Push3's default port (pinned, for on-screen controls) plus
+// whatever rt's note-input source is — adding a new Subscribe whenever
+// that changes. Old subscriptions are never explicitly torn down (the
+// underlying alsaseq.Client has no Unsubscribe); harmless, since
+// midiHandler.Fixed decides what's "current" by content, not by which
+// subscription delivered it. Runs until shutdown fires.
+func watchBraidsPort(rt *sharedConfig, handler alsaseq.Handler, shutdown <-chan struct{}) {
+	pinned := alsaseq.Addr{Client: alsaseq.Push3ClientDefault, Port: alsaseq.Push3PortDefault}
 
-func (f fixedMIDISource) getMIDI() (client, port byte) { return f.client, f.port }
-
-// watchMIDI opens an ALSA seq subscription to whatever src's current MIDI
-// source is, and reopens it whenever that changes. label is just for the
-// log lines, so the two concurrent subscriptions (notes vs. control
-// surface) are distinguishable. Runs until shutdown fires.
-func watchMIDI(src midiSource, label string, handler alsaseq.Handler, shutdown <-chan struct{}) {
 	var seq *alsaseq.Client
-	var curClient, curPort byte
 	haveSeq := false
+	subscribed := map[alsaseq.Addr]bool{}
 
 	stop := func() {
 		if haveSeq {
-			seq.Close() // makes the ReadLoop goroutine's blocking read fail, ending it
+			seq.Close()
 			haveSeq = false
+			subscribed = map[alsaseq.Addr]bool{}
 		}
 	}
 	defer stop()
@@ -60,21 +53,35 @@ func watchMIDI(src midiSource, label string, handler alsaseq.Handler, shutdown <
 		default:
 		}
 
-		client, port := src.getMIDI()
-		if !haveSeq || client != curClient || port != curPort {
-			stop()
-			newSeq, err := openMIDISource(client, port, handler)
+		if !haveSeq {
+			newSeq, err := openBraidsMIDIPort(handler)
 			if err != nil {
-				log.Printf("opening MIDI source %d:%d for %s: %v — will retry", client, port, label, err)
+				log.Printf("opening %s port: %v — will retry", braidsMIDIPortName, err)
 				if !sleepOrStop(waitPollInterval, shutdown) {
 					return
 				}
 				continue
 			}
 			seq = newSeq
-			curClient, curPort = client, port
 			haveSeq = true
-			log.Printf("subscribed to MIDI source %d:%d for %s", client, port, label)
+			log.Printf("%s port open — external MIDI gear or Live can connect to it directly", braidsMIDIPortName)
+			if err := seq.Subscribe(pinned); err != nil {
+				log.Printf("subscribing %s to Push3 %v: %v", braidsMIDIPortName, pinned, err)
+			} else {
+				subscribed[pinned] = true
+				log.Printf("subscribed %s to %v for on-screen control surface", braidsMIDIPortName, pinned)
+			}
+		}
+
+		client, port := rt.getMIDI()
+		target := alsaseq.Addr{Client: client, Port: port}
+		if !subscribed[target] {
+			if err := seq.Subscribe(target); err != nil {
+				log.Printf("subscribing %s to %v for note input: %v — will retry", braidsMIDIPortName, target, err)
+			} else {
+				subscribed[target] = true
+				log.Printf("subscribed %s to %v for note input", braidsMIDIPortName, target)
+			}
 		}
 
 		if !sleepOrStop(steadyPollInterval, shutdown) {
@@ -83,23 +90,19 @@ func watchMIDI(src midiSource, label string, handler alsaseq.Handler, shutdown <
 	}
 }
 
-func openMIDISource(client, port byte, handler alsaseq.Handler) (*alsaseq.Client, error) {
+func openBraidsMIDIPort(handler alsaseq.Handler) (*alsaseq.Client, error) {
 	seq, err := alsaseq.Open()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := seq.CreatePort("Push Braids Host In",
+	if _, err := seq.CreatePort(braidsMIDIPortName,
 		alsaseq.CapWrite|alsaseq.CapSubsWrite, alsaseq.PortTypeMidi|alsaseq.PortTypeApp); err != nil {
-		seq.Close()
-		return nil, err
-	}
-	if err := seq.Subscribe(alsaseq.Addr{Client: client, Port: port}); err != nil {
 		seq.Close()
 		return nil, err
 	}
 	go func() {
 		if err := seq.ReadLoop(handler); err != nil {
-			log.Printf("MIDI read loop ended: %v", err)
+			log.Printf("%s read loop ended: %v", braidsMIDIPortName, err)
 		}
 	}()
 	return seq, nil
