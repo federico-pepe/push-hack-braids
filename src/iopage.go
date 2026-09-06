@@ -1,12 +1,12 @@
 package main
 
-// iopage.go — the on-screen MIDI-input / audio-output picker: page 3 of
-// the existing Shift+Device param UI (see params.go/display.go). One
-// scrollable list combining both choices under a header each, instead of
-// two side-by-side lists with a focus toggle — simpler to build and to
-// use with only D-Pad Up/Down + Select available, and this list is short
-// enough in practice that scrolling between the two sections costs
-// nothing.
+// iopage.go — the SETTINGS page: 3 independent columns (MIDI IN, AUDIO
+// OUTPUT, AUDIO CHANNEL), each 2 of the 8 encoder-slot columns wide,
+// driven by encoders 1/3/5 and committed by bottom-screen buttons 1/3/5
+// (see audiosession.go's drainCtl and leds.go's pageBottomLit). Used to be
+// one combined vertical list driven by D-Pad Up/Down + Select — replaced
+// so each choice gets its own dedicated knob/button instead of sharing one
+// cursor across all three.
 
 import (
 	"fmt"
@@ -17,221 +17,257 @@ import (
 	"github.com/federico-pepe/ableton-push-hack/core/alsapcm"
 	"github.com/federico-pepe/ableton-push-hack/core/alsaseq"
 	"github.com/federico-pepe/ableton-push-hack/core/gfx"
+	"github.com/federico-pepe/ableton-push-hack/core/gfx/text"
 	"github.com/federico-pepe/ableton-push-hack/core/gfx/widgets"
 )
-
-type ioRowKind int
-
-const (
-	ioRowHeader ioRowKind = iota
-	ioRowInfo             // non-selectable, e.g. "Braids MIDI In" note
-	ioRowMidi
-	ioRowDevice
-	ioRowChannel
-)
-
-// selectable reports whether a row is a real pickable option (skip headers
-// and info rows when moving the cursor).
-func (k ioRowKind) selectable() bool { return k != ioRowHeader && k != ioRowInfo }
 
 // loopbackChannels is push-audio-loopback's fixed channel count (see that
 // hack's README) — used only to offer a full range of channel pairs here,
 // independent of whatever a live PCM session actually negotiated.
 const loopbackChannels = 32
 
-type ioRow struct {
-	kind          ioRowKind
-	label         string
-	midiPort      alsaseq.Port
-	device        alsapcm.PlaybackDevice
-	channelOffset int
-}
-
-// ioState is the I/O picker's own state: the combined row list (rebuilt
-// from live ALSA enumeration on every navigation step and every redraw —
-// this page is opened rarely and ALSA's /proc reads are cheap, so there is
-// no need to cache), and the current cursor/scroll position.
+// ioState holds the SETTINGS page's 3 independent column cursors. Each
+// column rebuilds its own option list fresh on every move/render (this
+// page is opened rarely and ALSA's /proc reads are cheap) rather than
+// caching, same posture as the page this replaces.
 type ioState struct {
 	mu      sync.Mutex
 	hackDir string
 	rt      *sharedConfig
-	cursor  int
-	scroll  int
-	rows    []ioRow
+
+	midiCursor, deviceCursor, channelCursor int
 }
 
 func newIOState(hackDir string, rt *sharedConfig) *ioState {
 	return &ioState{hackDir: hackDir, rt: rt}
 }
 
-// buildRows re-enumerates MIDI ports and playback devices and marks
-// whichever one sharedConfig currently points at.
-//
-// The MIDI list is filtered to Push3's own client (alsaseq.Push3ClientDefault)
-// only — early testing picked an unfiltered readable port that looked
-// plausible ("Ableton Push 3 User Port") but silently carries no pad/button
-// events at all, breaking the Shift+Device chord with no visible error.
-// Push3 exposes only three ports, already distinctly named ("Live Port",
-// "User Port", "External Port" — see /proc/asound/seq/clients), so
-// filtering to just this client removes the footgun without losing any
-// real choice.
-func (io *ioState) buildRows() []ioRow {
-	curClient, curPort := io.rt.getMIDI()
-	curDevice := io.rt.getPCM()
-	curOffset := io.rt.getChannelOffset()
+// midiOptions is one selectable row in the MIDI column.
+type midiOptions struct {
+	label string
+	port  alsaseq.Port
+}
 
-	var rows []ioRow
-	rows = append(rows, ioRow{kind: ioRowHeader, label: "MIDI INPUT"})
-	rows = append(rows, ioRow{kind: ioRowInfo, label: fmt.Sprintf("  %s — always open for external gear/Live", braidsMIDIPortName)})
+// buildMIDIRowsLocked lists Push3's own 3 ports, the only real choices —
+// see the historical footgun this filter avoids, still true here: an
+// unfiltered readable port can look plausible but carry no pad/button
+// events at all. Caller must hold io.mu.
+func (io *ioState) buildMIDIRowsLocked() []midiOptions {
 	ports, _ := alsaseq.EnumPorts(alsaseq.CapRead)
+	var out []midiOptions
 	for _, p := range ports {
 		if p.Addr.Client != alsaseq.Push3ClientDefault {
 			continue
 		}
-		mark := "  "
-		if p.Addr.Client == curClient && p.Addr.Port == curPort {
-			mark = "> "
-		}
-		rows = append(rows, ioRow{
-			kind:     ioRowMidi,
-			label:    fmt.Sprintf("%s%s", mark, p.PortName),
-			midiPort: p,
-		})
+		out = append(out, midiOptions{label: p.PortName, port: p})
 	}
+	return out
+}
 
-	rows = append(rows, ioRow{kind: ioRowHeader, label: "AUDIO OUTPUT"})
+type deviceOption struct {
+	label  string
+	device alsapcm.PlaybackDevice
+}
+
+func (io *ioState) buildDeviceRowsLocked() []deviceOption {
 	devices, _ := alsapcm.EnumPlaybackDevices()
-	for _, d := range devices {
-		mark := "  "
-		if d.HWDevice() == curDevice {
-			mark = "> "
-		}
-		rows = append(rows, ioRow{
-			kind:   ioRowDevice,
-			label:  fmt.Sprintf("%s%s (%s)", mark, d.Name, d.HWDevice()),
-			device: d,
-		})
+	out := make([]deviceOption, len(devices))
+	for i, d := range devices {
+		out[i] = deviceOption{label: fmt.Sprintf("%s (%s)", d.Name, d.HWDevice()), device: d}
 	}
+	return out
+}
 
-	rows = append(rows, ioRow{kind: ioRowHeader, label: "AUDIO CHANNEL"})
+type channelOption struct {
+	label  string
+	offset int
+}
+
+func (io *ioState) buildChannelRowsLocked() []channelOption {
+	var out []channelOption
 	for ch := 0; ch+1 < loopbackChannels; ch += 2 {
-		mark := "  "
-		if ch == curOffset {
-			mark = "> "
-		}
-		rows = append(rows, ioRow{
-			kind:          ioRowChannel,
-			label:         fmt.Sprintf("%sCh %d-%d", mark, ch+1, ch+2),
-			channelOffset: ch,
-		})
+		out = append(out, channelOption{label: fmt.Sprintf("Ch %d-%d", ch+1, ch+2), offset: ch})
 	}
-	return rows
+	return out
 }
 
-// refreshLocked rebuilds the row list and keeps the cursor on a
-// selectable row (never a header). Caller must hold io.mu.
-func (io *ioState) refreshLocked() {
-	io.rows = io.buildRows()
-	n := len(io.rows)
-	if io.cursor >= n {
-		io.cursor = n - 1
-	}
-	if io.cursor < 0 {
-		io.cursor = 0
-	}
-	for i := 0; n > 0 && !io.rows[io.cursor].kind.selectable() && i < n; i++ {
-		io.cursor = (io.cursor + 1) % n
-	}
-}
-
-// moveCursor steps the cursor by one row in delta's direction (its
-// magnitude is ignored — Push's D-Pad only ever sends a press, not an
-// accelerating value like the encoders), skipping over header rows.
-func (io *ioState) moveCursor(delta int) {
-	io.mu.Lock()
-	defer io.mu.Unlock()
-	io.refreshLocked()
-	n := len(io.rows)
+// clampCursor keeps c in [0,n-1] (or 0 if n==0).
+func clampCursor(c, n int) int {
 	if n == 0 {
-		return
+		return 0
 	}
-	dir := 1
-	if delta < 0 {
-		dir = -1
+	if c < 0 {
+		return 0
 	}
-	for i := 0; i < n; i++ {
-		io.cursor = (io.cursor + dir + n) % n
-		if io.rows[io.cursor].kind.selectable() {
-			break
-		}
+	if c >= n {
+		return n - 1
 	}
+	return c
 }
 
-// commit applies the currently highlighted row to sharedConfig and
-// persists it to braids-config.json. Applying it live (rather than only
-// on the next process start) is what lets watchHWParams/watchBraidsPort pick it
-// up on their next poll tick with no restart.
-func (io *ioState) commit() {
+// moveMIDICursor/moveDeviceCursor/moveChannelCursor step their column's
+// cursor by delta's sign (magnitude ignored, matching the D-Pad-driven
+// feel this page used to have — these lists are short enough that an
+// encoder's accelerating delta doesn't need extra throttling).
+func (io *ioState) moveMIDICursor(delta int) {
 	io.mu.Lock()
 	defer io.mu.Unlock()
-	io.refreshLocked()
-	if io.cursor < 0 || io.cursor >= len(io.rows) {
+	n := len(io.buildMIDIRowsLocked())
+	io.midiCursor = clampCursor(io.midiCursor+sign(delta), n)
+}
+
+func (io *ioState) moveDeviceCursor(delta int) {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	n := len(io.buildDeviceRowsLocked())
+	io.deviceCursor = clampCursor(io.deviceCursor+sign(delta), n)
+}
+
+func (io *ioState) moveChannelCursor(delta int) {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	n := len(io.buildChannelRowsLocked())
+	io.channelCursor = clampCursor(io.channelCursor+sign(delta), n)
+}
+
+func sign(v int) int {
+	if v < 0 {
+		return -1
+	}
+	if v > 0 {
+		return 1
+	}
+	return 0
+}
+
+// commitMIDI/commitDevice/commitChannel apply the highlighted option in
+// one column to sharedConfig and persist it — applying live (not just on
+// next start) is what lets watchHWParams/watchBraidsPort pick it up on
+// their next poll tick with no restart.
+func (io *ioState) commitMIDI() {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	rows := io.buildMIDIRowsLocked()
+	if io.midiCursor < 0 || io.midiCursor >= len(rows) {
 		return
 	}
-	row := io.rows[io.cursor]
-	switch row.kind {
-	case ioRowMidi:
-		io.rt.setMIDI(row.midiPort.Addr.Client, row.midiPort.Addr.Port)
-	case ioRowDevice:
-		io.rt.setPCM(row.device.HWDevice())
-	case ioRowChannel:
-		io.rt.setChannelOffset(row.channelOffset)
-	default:
+	row := rows[io.midiCursor]
+	io.rt.setMIDI(row.port.Addr.Client, row.port.Addr.Port)
+	io.saveLocked()
+}
+
+func (io *ioState) commitDevice() {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	rows := io.buildDeviceRowsLocked()
+	if io.deviceCursor < 0 || io.deviceCursor >= len(rows) {
 		return
 	}
+	io.rt.setPCM(rows[io.deviceCursor].device.HWDevice())
+	io.saveLocked()
+}
+
+func (io *ioState) commitChannel() {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	rows := io.buildChannelRowsLocked()
+	if io.channelCursor < 0 || io.channelCursor >= len(rows) {
+		return
+	}
+	io.rt.setChannelOffset(rows[io.channelCursor].offset)
+	io.saveLocked()
+}
+
+// saveLocked persists sharedConfig to braids-config.json. Caller must hold io.mu.
+func (io *ioState) saveLocked() {
 	if err := saveConfig(io.hackDir, io.rt.snapshot()); err != nil {
-		log.Printf("io picker: saving %s: %v", configFileName, err)
+		log.Printf("settings: saving %s: %v", configFileName, err)
 	}
 }
 
-const ioRowH = 13
+const settingsRowH = 13
+const settingsColW = 2 * cellW // each of the 3 columns spans 2 of the 8 encoder slots
 
-// render draws the combined list. screenW/screenH come from display.go.
+// render draws the 3 columns side by side. screenW/screenH/cellW come from
+// display.go.
 func (io *ioState) render() *image.NRGBA {
 	io.mu.Lock()
 	defer io.mu.Unlock()
-	io.refreshLocked()
 
 	img := image.NewNRGBA(image.Rect(0, 0, screenW, screenH))
 	gfx.FillRect(img, 0, 0, screenW, screenH, widgets.Default.Black)
+	renderTopTabs(img, widgets.Default, pageSettings)
 
-	rows := make([]widgets.ListRow, len(io.rows))
-	for i, r := range io.rows {
-		switch r.kind {
-		case ioRowHeader:
-			rows[i] = widgets.ListRow{Text: "-- " + r.label + " --", TextCol: widgets.Default.Gray}
-		case ioRowInfo:
-			rows[i] = widgets.ListRow{Text: r.label, TextCol: widgets.Default.Gray}
-		default:
-			rows[i] = widgets.ListRow{Text: r.label, TextCol: widgets.Default.White}
+	curClient, curPort := io.rt.getMIDI()
+	curDevice := io.rt.getPCM()
+	curOffset := io.rt.getChannelOffset()
+
+	midiRows := io.buildMIDIRowsLocked()
+	midiLabels := make([]string, len(midiRows))
+	for i, r := range midiRows {
+		mark := "  "
+		if r.port.Addr.Client == curClient && r.port.Addr.Port == curPort {
+			mark = "> "
 		}
+		midiLabels[i] = mark + r.label
 	}
+	drawSettingsColumn(img, 0*settingsColW, "MIDI IN", midiLabels, io.midiCursor)
 
-	visRows := (screenH - ioRowH) / ioRowH
-	if io.cursor < io.scroll {
-		io.scroll = io.cursor
+	deviceRows := io.buildDeviceRowsLocked()
+	deviceLabels := make([]string, len(deviceRows))
+	for i, r := range deviceRows {
+		mark := "  "
+		if r.device.HWDevice() == curDevice {
+			mark = "> "
+		}
+		deviceLabels[i] = mark + r.label
 	}
-	if io.cursor >= io.scroll+visRows {
-		io.scroll = io.cursor - visRows + 1
-	}
+	drawSettingsColumn(img, 1*settingsColW, "AUDIO OUTPUT", deviceLabels, io.deviceCursor)
 
-	v := widgets.ListView{
-		Rows:       rows,
-		Cursor:     io.cursor,
-		Scroll:     io.scroll,
-		Breadcrumb: "BRAIDS - I/O - UP/DOWN select, SELECT to confirm",
-		EmptyText:  "no MIDI ports or audio devices found",
+	channelRows := io.buildChannelRowsLocked()
+	channelLabels := make([]string, len(channelRows))
+	for i, r := range channelRows {
+		mark := "  "
+		if r.offset == curOffset {
+			mark = "> "
+		}
+		channelLabels[i] = mark + r.label
 	}
-	widgets.RenderList(img, widgets.Default, v, 0, screenW, ioRowH, screenH)
+	drawSettingsColumn(img, 2*settingsColW, "AUDIO CHANNEL", channelLabels, io.channelCursor)
+
 	return img
+}
+
+// drawSettingsColumn draws one column's title and scrollable row list —
+// none of widgets' list helpers take an x-offset (they all draw at x=0
+// spanning a caller-given width), so this is a small hand-rolled column
+// renderer rather than 3 calls to widgets.RenderList.
+func drawSettingsColumn(img *image.NRGBA, x int, title string, labels []string, cursor int) {
+	t := widgets.Default
+	text.Draw(img, x+4, 28, title, t.Gray)
+
+	const top = 34
+	visRows := (screenH - top) / settingsRowH
+	scroll := cursor - visRows/2
+	if scroll < 0 {
+		scroll = 0
+	}
+	if maxScroll := len(labels) - visRows; maxScroll < 0 {
+		scroll = 0
+	} else if scroll > maxScroll {
+		scroll = maxScroll
+	}
+
+	for i := 0; i < visRows; i++ {
+		idx := scroll + i
+		if idx >= len(labels) {
+			break
+		}
+		y := top + i*settingsRowH
+		col := t.White
+		if idx == cursor {
+			gfx.FillRect(img, x, y, settingsColW-4, settingsRowH, t.Select)
+		}
+		text.Draw(img, x+4, y+settingsRowH-3, labels[idx], col)
+	}
 }

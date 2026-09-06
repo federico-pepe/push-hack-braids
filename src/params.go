@@ -38,17 +38,24 @@ type paramMeta struct {
 }
 
 // paramPages curates which params sit on which page and in which encoder
-// slot (index 0-7, left to right, matching CC 71-78). A page may leave
-// trailing encoders unused — the filter envelope page below only fills 4.
+// slot (index 0-7, left to right, matching CC 71-78). Only covers the 2
+// generic knob-grid pages (pageOscAmp/pageFilter) — PRESETS and SETTINGS
+// render and handle encoders their own way (see renderPatchPage/iopage.go).
 var paramPages = [][]string{
 	{"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
 	{"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
-	{"preset", "octave_transpose"},
 }
 
-// pageNames has one more entry than paramPages: the last page is the I/O
-// picker (iopage.go), not a param page — see IsIOPage.
-var pageNames = []string{"OSC / AMP", "FILTER", "PATCH", "I/O"}
+// Page indices, jumped to directly by top-screen button press (CCScreenTopN)
+// — see main.go's Fixed() and pageNames below.
+const (
+	pageOscAmp = iota
+	pageFilter
+	pagePresets
+	pageSettings
+)
+
+var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "SETTINGS"}
 
 // paramSlot is one parameter's live state: its metadata plus the Go-side
 // value driving the plugin. The plugin's get_param has no "current value"
@@ -72,8 +79,9 @@ type paramSlot struct {
 // Braids algorithms, so the lightest graze of the encoder used to jump
 // several algorithms past the one you wanted.
 var enumSensitivity = map[string]int{
-	"engine": 4,
-	"preset": 4,
+	"engine":           4,
+	"preset":           4,
+	"octave_transpose": 4,
 }
 
 // sensitivityFor returns how much accumulated delta enum key needs before
@@ -94,6 +102,12 @@ type paramState struct {
 	page  int
 	slots map[string]*paramSlot
 	dirty bool
+
+	// presetCursor/presetAccum: PRESETS page's staged (not-yet-loaded)
+	// highlight — separate from slots["preset"].value, which only changes
+	// once Load (bottom-1) is pressed. See movePresetCursor/loadStagedPreset.
+	presetCursor int
+	presetAccum  int
 }
 
 // fetchChainParams calls the plugin's get_param("chain_params") and parses
@@ -198,15 +212,26 @@ func newParamState(metas []paramMeta) *paramState {
 	}
 
 	st := &paramState{slots: make(map[string]*paramSlot)}
+	addSlot := func(key string) {
+		meta, ok := byKey[key]
+		if !ok {
+			log.Printf("params: %q not found in plugin's chain_params, skipping", key)
+			return
+		}
+		st.slots[key] = &paramSlot{meta: meta, value: defaults[key]}
+	}
 	for _, page := range paramPages {
 		for _, key := range page {
-			meta, ok := byKey[key]
-			if !ok {
-				log.Printf("params: %q not found in plugin's chain_params, skipping", key)
-				continue
-			}
-			st.slots[key] = &paramSlot{meta: meta, value: defaults[key]}
+			addSlot(key)
 		}
+	}
+	// "preset" and "octave_transpose" aren't on any paramPages grid page —
+	// PRESETS (pagePresets) renders and drives them itself (see
+	// renderPatchPage, movePresetCursor, loadStagedPreset, NudgeOctave).
+	addSlot("preset")
+	addSlot("octave_transpose")
+	if presetSlot, ok := st.slots["preset"]; ok {
+		st.presetCursor = int(presetSlot.value + 0.5)
 	}
 	return st
 }
@@ -226,32 +251,24 @@ func stepFor(meta paramMeta) float64 {
 	return span / 100.0
 }
 
-// applyEncoder nudges the param in encoder slot idx (0-7) on the current
-// page by delta ticks, clamps it into the plugin's own reported range, and
-// returns the key/value string pair ready for bridge_plugin_set_param. ok
-// is false when that encoder has no param on the current page.
-func (st *paramState) applyEncoder(idx, delta int) (key, val string, ok bool) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	page := paramPages[st.page]
-	if idx < 0 || idx >= len(page) {
-		return "", "", false
-	}
-	slot := st.slots[page[idx]]
-	if slot == nil {
-		return "", "", false
-	}
-	if slot.meta.Type == "enum" {
+// nudgeSlotLocked applies one encoder's delta to slot (enum: accumulate to
+// sensitivityFor(key) then step by one option; float/int: stepFor(meta)
+// per tick), clamped to the plugin's own reported range. Caller must hold
+// st.mu. Shared by applyEncoder (page-grid params) and NudgeOctave (a
+// param outside any paramPages grid — see newParamState's addSlot doc).
+func nudgeSlotLocked(slot *paramSlot, key string, delta int) (val string) {
+	if slot.meta.Type == "enum" || slot.meta.Type == "int" {
 		// Push's encoders accelerate — a fast turn sends delta up to ±11,
 		// not ±1 (core/push3/encoder.go's DecodeRel doc). That's fine for
-		// a continuous float sweep, but for a discrete list like the
-		// engine's shapes it made one brisk flick jump 11 algorithms at
-		// once. Accumulate delta instead and step by exactly one option
-		// per sensitivityFor(key) units of accumulated turn — 1 (the
-		// default) steps on every message same as before; "engine" is
-		// tuned heavier (see enumSensitivity) so it takes deliberate
-		// turning to browse its 47 algorithms.
-		div := sensitivityFor(page[idx])
+		// a continuous float sweep, but for a small discrete range it made
+		// one brisk flick jump clean across it in a single message (an
+		// enum's shape list, or octave_transpose's whole -3..3 span).
+		// Accumulate delta instead and step by exactly one unit per
+		// sensitivityFor(key) ticks of accumulated turn — 1 (the default)
+		// steps on every message same as before a key was tuned; "engine"/
+		// "octave_transpose" are heavier (see enumSensitivity) so browsing
+		// them takes deliberate turning, not one graze.
+		div := sensitivityFor(key)
 		slot.accum += delta
 		for slot.accum >= div {
 			slot.value++
@@ -270,28 +287,118 @@ func (st *paramState) applyEncoder(idx, delta int) (key, val string, ok bool) {
 	if slot.value > slot.meta.Max {
 		slot.value = slot.meta.Max
 	}
-	st.dirty = true
 	if slot.meta.Type == "float" {
-		return page[idx], fmt.Sprintf("%.4f", slot.value), true
+		return fmt.Sprintf("%.4f", slot.value)
 	}
-	return page[idx], fmt.Sprintf("%d", int(slot.value+0.5)), true
+	return fmt.Sprintf("%d", int(slot.value+0.5))
 }
 
-// changePage moves by delta pages, clamped to the available pages —
-// including the I/O picker page, which is one past the last param page
-// (see pageNames and IsIOPage).
-func (st *paramState) changePage(delta int) {
+// applyEncoder nudges the param in encoder slot idx (0-7) on the current
+// paramPages grid page (pageOscAmp/pageFilter) by delta ticks, and returns
+// the key/value string pair ready for bridge_plugin_set_param. ok is false
+// when the current page isn't a paramPages grid page, or that encoder has
+// no param on it.
+func (st *paramState) applyEncoder(idx, delta int) (key, val string, ok bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	p := st.page + delta
-	if p < 0 {
-		p = 0
+	if st.page < 0 || st.page >= len(paramPages) {
+		return "", "", false
 	}
-	if p > len(pageNames)-1 {
-		p = len(pageNames) - 1
+	page := paramPages[st.page]
+	if idx < 0 || idx >= len(page) {
+		return "", "", false
 	}
-	if p != st.page {
-		st.page = p
+	slot := st.slots[page[idx]]
+	if slot == nil {
+		return "", "", false
+	}
+	val = nudgeSlotLocked(slot, page[idx], delta)
+	st.dirty = true
+	return page[idx], val, true
+}
+
+// NudgeOctave applies one encoder tick to octave_transpose — PRESETS
+// page's column-2 knob, immediate (unlike the staged preset browse in
+// column 1) since it's not gated behind Load. Not on any paramPages grid
+// page, so it can't go through applyEncoder.
+func (st *paramState) NudgeOctave(delta int) (val string, ok bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	slot := st.slots["octave_transpose"]
+	if slot == nil {
+		return "", false
+	}
+	val = nudgeSlotLocked(slot, "octave_transpose", delta)
+	st.dirty = true
+	return val, true
+}
+
+// movePresetCursor moves PRESETS page's staged highlight by delta ticks
+// (same accumulate-then-step feel as an enum param, via enumSensitivity's
+// "preset" entry) — does not touch slots["preset"].value or the plugin;
+// only loadStagedPreset (Load, bottom-1) does that.
+func (st *paramState) movePresetCursor(delta int) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	slot := st.slots["preset"]
+	if slot == nil {
+		return
+	}
+	div := sensitivityFor("preset")
+	st.presetAccum += delta
+	for st.presetAccum >= div {
+		st.presetCursor++
+		st.presetAccum -= div
+	}
+	for st.presetAccum <= -div {
+		st.presetCursor--
+		st.presetAccum += div
+	}
+	if n := len(slot.meta.Options); st.presetCursor >= n {
+		st.presetCursor = n - 1
+	}
+	if st.presetCursor < 0 {
+		st.presetCursor = 0
+	}
+	st.dirty = true
+}
+
+// PresetCursor returns PRESETS page's current staged highlight index.
+func (st *paramState) PresetCursor() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.presetCursor
+}
+
+// loadStagedPreset commits the staged highlight as the actual preset
+// (Load, bottom-1 on PRESETS) — the caller still owns sending it to the
+// plugin (bridge_plugin_set_param("preset", idx)), same division of
+// responsibility as applyEncoder/NudgeOctave.
+func (st *paramState) loadStagedPreset() (idx int, ok bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	slot := st.slots["preset"]
+	if slot == nil {
+		return 0, false
+	}
+	slot.value = float64(st.presetCursor)
+	st.dirty = true
+	return st.presetCursor, true
+}
+
+// setPage jumps directly to page n (a top-screen button press), clamped to
+// the 4 fixed pages (see pageNames) — no relative D-Pad delta anymore.
+func (st *paramState) setPage(n int) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	if n > len(pageNames)-1 {
+		n = len(pageNames) - 1
+	}
+	if n != st.page {
+		st.page = n
 		st.dirty = true
 	}
 }
@@ -303,15 +410,9 @@ func (st *paramState) Page() int {
 	return st.page
 }
 
-// IsIOPage reports whether the current page is the I/O picker (iopage.go)
-// rather than a param page.
-func (st *paramState) IsIOPage() bool {
-	return st.Page() == len(paramPages)
-}
-
 // MarkDirty flags the display loop to redraw on its next tick — used by
-// the I/O picker (iopage.go), which changes its own state outside of
-// applyEncoder/changePage.
+// the SETTINGS page (iopage.go), which changes its own state outside of
+// applyEncoder/setPage.
 func (st *paramState) MarkDirty() {
 	st.mu.Lock()
 	defer st.mu.Unlock()

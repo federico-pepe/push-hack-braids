@@ -7,14 +7,35 @@ package main
 import "C"
 
 import (
+	"fmt"
 	"log"
+	"math"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"push-braids/hwparams"
 )
+
+// cSetParam is bridge_plugin_set_param's CString/free boilerplate, shared
+// by every drainCtl case that sends a param to the plugin.
+func cSetParam(plugin *C.bridge_plugin_t, key, val string) {
+	k, v := C.CString(key), C.CString(val)
+	C.bridge_plugin_set_param(plugin, k, v)
+	C.free(unsafe.Pointer(k))
+	C.free(unsafe.Pointer(v))
+}
+
+// levelMeter is a lock-free live peak level (0-1), written every render
+// block by audioSession.run, read at ~30fps by the display loop for the
+// Volume fader — a plain atomic instead of a mutex since it's write-heavy
+// on the real-time render thread and read-only everywhere else.
+type levelMeter struct{ bits atomic.Uint64 }
+
+func (m *levelMeter) set(v float64) { m.bits.Store(math.Float64bits(v)) }
+func (m *levelMeter) get() float64  { return math.Float64frombits(m.bits.Load()) }
 
 // audioSession owns one open PCM handle and the goroutine rendering into
 // it. The DSP plugin instance and MIDI subscription live independently in
@@ -34,7 +55,8 @@ type audioSession struct {
 // goroutine. rate is passed separately from hp because the caller decides
 // which rate to request; in practice it is always hp.Rate.
 func startAudioSession(plugin *C.bridge_plugin_t, device string, hp hwparams.Params,
-	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState, rt *sharedConfig) (*audioSession, error) {
+	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState, rt *sharedConfig,
+	level *levelMeter) (*audioSession, error) {
 
 	cDev := C.CString(device)
 	defer C.free(unsafe.Pointer(cDev))
@@ -53,7 +75,7 @@ func startAudioSession(plugin *C.bridge_plugin_t, device string, hp hwparams.Par
 	log.Printf("audio session opened: device=%s channels=%d rate=%d period=%d (requested period=%d buffer=%d)",
 		device, s.channels, hp.Rate, s.period, hp.Period, hp.Buffer)
 
-	go s.run(plugin, midiCh, ctlCh, params, io, rt, hp.Rate)
+	go s.run(plugin, midiCh, ctlCh, params, io, rt, hp.Rate, level)
 	return s, nil
 }
 
@@ -73,7 +95,7 @@ func (s *audioSession) stop() {
 // would silently reintroduce the "clean short taps, glitches on held
 // notes" bug already fixed once (see main.go's history / CHANGELOG).
 func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctlCh <-chan controlEvent,
-	params *paramState, io *ioState, rt *sharedConfig, rate int) {
+	params *paramState, io *ioState, rt *sharedConfig, rate int, level *levelMeter) {
 	defer close(s.doneCh)
 	defer C.bridge_pcm_close(s.pcm)
 
@@ -87,6 +109,13 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 	stereo := make([]int16, s.period*2)
 	wide := make([]int16, s.period*s.channels)
 	budget := time.Duration(s.period) * time.Second / time.Duration(rate)
+
+	// meterDecay is the level meter's per-block release factor — a 300ms
+	// peak-hold time constant, converted to "how much to decay by" for a
+	// block of this session's own period/rate rather than a fixed guess,
+	// so the meter's feel doesn't change if Live renegotiates the buffer.
+	const meterTau = 0.3
+	meterDecay := math.Exp(-float64(s.period) / float64(rate) / meterTau)
 
 	var blocks, xrunRetries, notesReceived, slowBlocks int64
 	var maxPre, maxWrite time.Duration
@@ -118,41 +147,69 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 			}
 		}
 
-		// Drain any encoder turns / page changes / I/O-picker actions the
+		// Drain any encoder turns / page jumps / bottom-button presses the
 		// same way — applying them here keeps every bridge_plugin_* call
 		// on this one goroutine, same reasoning as the MIDI drain above.
+		// Dispatch is by current page: PRESETS and SETTINGS own encoders
+		// 1/2 and 1/3/5 respectively (see params.go/iopage.go); every other
+		// page uses the generic paramPages grid via applyEncoder.
 	drainCtl:
 		for {
 			select {
 			case ev := <-ctlCh:
-				switch ev.encoderIdx {
-				case -1:
-					params.changePage(ev.delta)
-					continue
-				case -2:
-					if params.IsIOPage() {
-						io.moveCursor(ev.delta)
-						params.MarkDirty()
+				switch ev.kind {
+				case ctlPageJump:
+					params.setPage(ev.idx)
+
+				case ctlBottomPress:
+					switch params.Page() {
+					case pagePresets:
+						if ev.idx == 0 { // bottom-1 = Load
+							if idx, ok := params.loadStagedPreset(); ok {
+								cSetParam(plugin, "preset", fmt.Sprintf("%d", idx))
+							}
+						}
+					case pageSettings:
+						switch ev.idx {
+						case 0:
+							io.commitMIDI()
+							params.MarkDirty()
+						case 2:
+							io.commitDevice()
+							params.MarkDirty()
+						case 4:
+							io.commitChannel()
+							params.MarkDirty()
+						}
 					}
-					continue
-				case -3:
-					if params.IsIOPage() {
-						io.commit()
+
+				case ctlEncoder:
+					switch params.Page() {
+					case pagePresets:
+						switch ev.idx {
+						case 0:
+							params.movePresetCursor(ev.delta)
+						case 1:
+							if val, ok := params.NudgeOctave(ev.delta); ok {
+								cSetParam(plugin, "octave_transpose", val)
+							}
+						}
+					case pageSettings:
+						switch ev.idx {
+						case 0:
+							io.moveMIDICursor(ev.delta)
+						case 2:
+							io.moveDeviceCursor(ev.delta)
+						case 4:
+							io.moveChannelCursor(ev.delta)
+						}
 						params.MarkDirty()
+					default:
+						if key, val, ok := params.applyEncoder(ev.idx, ev.delta); ok {
+							cSetParam(plugin, key, val)
+						}
 					}
-					continue
 				}
-				if params.IsIOPage() {
-					continue // encoders are inert on the I/O page
-				}
-				key, val, ok := params.applyEncoder(ev.encoderIdx, ev.delta)
-				if !ok {
-					continue
-				}
-				k, v := C.CString(key), C.CString(val)
-				C.bridge_plugin_set_param(plugin, k, v)
-				C.free(unsafe.Pointer(k))
-				C.free(unsafe.Pointer(v))
 			default:
 				break drainCtl
 			}
@@ -160,6 +217,19 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 
 		C.bridge_plugin_render(plugin,
 			(*C.int16_t)(unsafe.Pointer(&stereo[0])), C.int(s.period))
+
+		// Live level for the Volume fader (display.go) — instantaneous
+		// peak this block, decayed against the last read for a standard
+		// VU peak-hold look between the ~30fps display reads and this much
+		// faster block rate. No allocation, one pass over already-decoded
+		// samples — safe in this real-time loop.
+		blockPeak := 0.0
+		for _, v := range stereo {
+			if a := math.Abs(float64(v)) / 32768.0; a > blockPeak {
+				blockPeak = a
+			}
+		}
+		level.set(math.Max(level.get()*meterDecay, blockPeak))
 
 		for i := range wide {
 			wide[i] = 0
@@ -267,7 +337,7 @@ const msgWaitingForLive = "1. Go to Push Audio Settings.\n" +
 // boot-time service start order (see catalog/schema.md).
 func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState,
-	status *audioStatus, shutdown <-chan struct{}) {
+	status *audioStatus, level *levelMeter, shutdown <-chan struct{}) {
 
 	var sess *audioSession
 	var lastParams hwparams.Params
@@ -332,7 +402,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 		device := rt.getPCM()
 		if !haveSess || hp != lastParams || device != lastDevice {
 			stopSession()
-			newSess, err := startAudioSession(plugin, device, hp, midiCh, ctlCh, params, io, rt)
+			newSess, err := startAudioSession(plugin, device, hp, midiCh, ctlCh, params, io, rt, level)
 			if err != nil {
 				log.Printf("opening PCM %s: %v — will retry", device, err)
 				status.set(false, msgWaitingForLive)

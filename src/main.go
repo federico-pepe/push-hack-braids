@@ -30,7 +30,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"syscall"
 	"time"
 	"unsafe"
@@ -91,21 +90,27 @@ type midiHandler struct {
 	io      *ioState
 	astatus *audioStatus
 	rt      *sharedConfig
+	level   *levelMeter
 }
+
+// ctlKind is a controlEvent's kind — see controlEvent's doc.
+type ctlKind int
+
+const (
+	ctlEncoder     ctlKind = iota // idx 0-7, delta = tick count
+	ctlPageJump                   // idx = page index (top-screen button 1-4 pressed)
+	ctlBottomPress                // idx = button index 0-7 (bottom-screen button pressed)
+)
 
 // controlEvent is a CC-derived UI action decoded on the ALSA read-loop
 // goroutine and applied on the render goroutine (audiosession.go's
 // drainCtl), the same split as note messages and for the same reason:
 // every bridge_plugin_* call must happen from the one goroutine that owns
 // the plugin instance (see midiHandler's doc comment above).
-//
-// encoderIdx encodes the kind of event: >=0 is an encoder turn (delta is
-// the tick count); -1 is a page change (delta is ±1); -2 is an I/O-picker
-// cursor move, only acted on while that page is showing (delta is ±1);
-// -3 is an I/O-picker commit (Select pressed), delta unused.
 type controlEvent struct {
-	encoderIdx int
-	delta      int
+	kind  ctlKind
+	idx   int
+	delta int
 }
 
 func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
@@ -137,24 +142,22 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		val := uint8(binary.LittleEndian.Uint32(data[8:]) & 0x7F)
 
 		if cc == ccShift || cc == ccDevice {
-			onChordCC(cc, val, h.pmURL, h.params, h.io, h.astatus)
+			onChordCC(cc, val, h.pmURL, h.params, h.io, h.astatus, h.level)
 			return
 		}
 
+		// D-Pad/Select are unused now — top/bottom screen buttons replace
+		// them entirely (page nav + per-page actions), and their LEDs go
+		// dark to match (see leds.go). Not matching any case below is a
+		// silent no-op, same as any other CC this host doesn't care about.
 		var ev controlEvent
 		switch {
 		case cc >= push3.CCEncoder1 && cc <= push3.CCEncoder8:
-			ev = controlEvent{encoderIdx: int(cc) - push3.CCEncoder1, delta: push3.DecodeRel(val)}
-		case cc == push3.CCDPadLeft && val == 127:
-			ev = controlEvent{encoderIdx: -1, delta: -1}
-		case cc == push3.CCDPadRight && val == 127:
-			ev = controlEvent{encoderIdx: -1, delta: 1}
-		case cc == push3.CCDPadUp && val == 127:
-			ev = controlEvent{encoderIdx: -2, delta: -1}
-		case cc == push3.CCDPadDown && val == 127:
-			ev = controlEvent{encoderIdx: -2, delta: 1}
-		case cc == push3.CCSelect && val == 127:
-			ev = controlEvent{encoderIdx: -3}
+			ev = controlEvent{kind: ctlEncoder, idx: int(cc) - push3.CCEncoder1, delta: push3.DecodeRel(val)}
+		case cc >= push3.CCScreenTop1 && cc <= push3.CCScreenTop4 && val == 127:
+			ev = controlEvent{kind: ctlPageJump, idx: int(cc) - push3.CCScreenTop1}
+		case cc >= push3.CCScreenBot1 && cc <= push3.CCScreenBot8 && val == 127:
+			ev = controlEvent{kind: ctlBottomPress, idx: int(cc) - push3.CCScreenBot1}
 		default:
 			return
 		}
@@ -302,12 +305,16 @@ func runSupervised() {
 		pmURL = defaultPushManagerURL
 	}
 
-	// The render goroutine(s) below are allocation-free (all buffers
-	// pre-allocated, no per-iteration heap traffic), so GC should already
-	// run rarely — but "should" isn't "does." Disabling it outright
-	// removes GC as a variable entirely, rather than leaving it as an
-	// unmeasured maybe.
-	debug.SetGCPercent(-1)
+	// The audio render goroutine itself is allocation-free (all buffers
+	// pre-allocated, no per-iteration heap traffic) and stays that way —
+	// but the display loop legitimately allocates a fresh PNG frame on
+	// every redraw (runDisplayLoop, for the Volume fader's live meter).
+	// Disabling GC process-wide used to be safe when nothing allocated at
+	// all; now it guarantees an OOM crash the longer the UI stays open
+	// (confirmed on hardware). Leave GC at its default — a concurrent GC's
+	// brief pauses run on their own goroutine, not the SCHED_FIFO render
+	// thread, so this doesn't reintroduce the glitch the disable above was
+	// originally guarding against.
 
 	dspPath := filepath.Join(hackDir, "dsp.so")
 	moduleDir := filepath.Join(hackDir, "module")
@@ -355,20 +362,21 @@ func runSupervised() {
 	params := newParamState(metas)
 
 	// rt is persistedConfig's live counterpart: watchBraidsPort/watchHWParams
-	// act on it, and the on-screen I/O page (page 3, Shift+Device then D-Pad
-	// Right twice) writes to it when the user picks a different port or
-	// device — no process restart needed, and it's saved back to
-	// braids-config.json right after (see iopage.go's commit).
+	// act on it, and the SETTINGS page (Shift+Device, top-screen button 4)
+	// writes to it when the user picks a different port or device — no
+	// process restart needed, and it's saved back to braids-config.json
+	// right after (see iopage.go's commitMIDI/commitDevice/commitChannel).
 	rt := newSharedConfig(cfg)
 	io := newIOState(hackDir, rt)
 	astatus := &audioStatus{msg: msgWaitingForCard} // starting guess till watchHWParams' 1st check
+	level := &levelMeter{}
 
 	go runDependencyWatcher(pmURL)
-	go runDisplayLoop(pmURL, params, io, astatus)
+	go runDisplayLoop(pmURL, params, io, astatus, level)
 
 	midiCh := make(chan [3]byte, 256)
 	ctlCh := make(chan controlEvent, 64)
-	handler := &midiHandler{out: midiCh, ctl: ctlCh, pmURL: pmURL, params: params, io: io, astatus: astatus, rt: rt}
+	handler := &midiHandler{out: midiCh, ctl: ctlCh, pmURL: pmURL, params: params, io: io, astatus: astatus, rt: rt, level: level}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -389,7 +397,7 @@ func runSupervised() {
 	// value someone guessed and hardcoded, and reopens whenever those
 	// params (or the user's chosen PCM device, via rt) change. See
 	// audiosession.go.
-	watchHWParams(cardID, rt, plugin, midiCh, ctlCh, params, io, astatus, shutdown)
+	watchHWParams(cardID, rt, plugin, midiCh, ctlCh, params, io, astatus, level, shutdown)
 
 	// Best-effort: leaving push-manager's MIDI intercept or display
 	// takeover stuck on after this process exits would silently block pad
