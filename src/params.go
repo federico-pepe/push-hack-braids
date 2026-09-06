@@ -73,6 +73,7 @@ type paramSlot struct {
 // several algorithms past the one you wanted.
 var enumSensitivity = map[string]int{
 	"engine": 4,
+	"preset": 4,
 }
 
 // sensitivityFor returns how much accumulated delta enum key needs before

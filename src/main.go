@@ -192,6 +192,34 @@ func (h *midiHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {
 	// SysEx etc. — not relevant to a sound-generator module, ignored.
 }
 
+// notesOnlyHandler and controlsOnlyHandler split midiHandler's one Fixed
+// implementation across the two independent ALSA seq subscriptions
+// watchMIDI now runs (see midisession.go's package doc): one pinned
+// permanently to Push3's own port for on-screen-control traffic, one
+// retargetable by the I/O picker for note input. Both still funnel into
+// the same midiHandler.Fixed, which already tells the two kinds of event
+// apart by content (evType, then channel/note-range) — these wrappers just
+// gate which subscription is allowed to feed it which kind, so picking a
+// different note-input source can never also take Push3's own encoders/
+// D-Pad/screen buttons down with it.
+type notesOnlyHandler struct{ inner *midiHandler }
+
+func (h notesOnlyHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
+	if evType == alsaseq.EvNoteOn || evType == alsaseq.EvNoteOff {
+		h.inner.Fixed(evType, src, data)
+	}
+}
+func (h notesOnlyHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {}
+
+type controlsOnlyHandler struct{ inner *midiHandler }
+
+func (h controlsOnlyHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
+	if evType == alsaseq.EvController {
+		h.inner.Fixed(evType, src, data)
+	}
+}
+func (h controlsOnlyHandler) VarLen(evType uint8, src alsaseq.Addr, payload []byte) {}
+
 func main() {
 	// A catalog install only ever respawns this process by restarting the
 	// init.d service, which does not happen on its own if the process
@@ -360,9 +388,13 @@ func runSupervised() {
 		close(shutdown)
 	}()
 
-	// MIDI: subscribes to whatever rt's current source is and re-subscribes
-	// whenever the I/O picker changes it — see midisession.go.
-	go watchMIDI(rt, handler, shutdown)
+	// MIDI: two independent subscriptions (see midisession.go's package
+	// doc). Notes follow whatever rt's current source is and re-subscribe
+	// whenever the I/O picker changes it; Push3's own encoders/D-Pad/screen
+	// buttons always come from Push3's own port, regardless of that choice.
+	go watchMIDI(rt, "pad/button note input", notesOnlyHandler{handler}, shutdown)
+	go watchMIDI(fixedMIDISource{alsaseq.Push3ClientDefault, alsaseq.Push3PortDefault},
+		"on-screen control surface", controlsOnlyHandler{handler}, shutdown)
 
 	// The audio session itself — PCM open/close, channels/rate/period —
 	// is fully owned by this supervisor loop, which blocks until shutdown

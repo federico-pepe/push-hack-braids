@@ -50,6 +50,9 @@ func renderParamPage(st *paramState, io *ioState) *image.NRGBA {
 	if st.IsIOPage() {
 		return io.render()
 	}
+	if pageNames[st.page] == "PATCH" {
+		return renderPatchPage(st)
+	}
 
 	img := image.NewNRGBA(image.Rect(0, 0, screenW, screenH))
 	gfx.FillRect(img, 0, 0, screenW, screenH, widgets.Default.Black)
@@ -87,6 +90,66 @@ func renderParamPage(st *paramState, io *ioState) *image.NRGBA {
 			Max:   c.slot.meta.Max * 100,
 		})
 	}
+	return img
+}
+
+// renderPatchPage draws the PATCH page (preset + octave transpose) as a
+// full-screen scrollable list of every preset name, rather than the
+// generic per-cell rendering the other pages use — a plain centered
+// readout only ever shows the currently selected preset, and the whole
+// point of the encoder's reduced sensitivity (see enumSensitivity) is
+// deliberate browsing, which needs to see the neighboring options too, not
+// just where the cursor currently sits. Reuses iopage.go's own list
+// widget/scroll-centering pattern.
+func renderPatchPage(st *paramState) *image.NRGBA {
+	st.mu.Lock()
+	presetSlot := st.slots["preset"]
+	octSlot := st.slots["octave_transpose"]
+	st.mu.Unlock()
+
+	img := image.NewNRGBA(image.Rect(0, 0, screenW, screenH))
+	gfx.FillRect(img, 0, 0, screenW, screenH, widgets.Default.Black)
+
+	if presetSlot == nil {
+		text.Draw(img, 8, 16, "BRAIDS - PATCH - no presets found", widgets.Default.Gray)
+		return img
+	}
+
+	cur := int(presetSlot.value + 0.5)
+	rows := make([]widgets.ListRow, len(presetSlot.meta.Options))
+	for i, name := range presetSlot.meta.Options {
+		mark, col := "  ", widgets.Default.Gray
+		if i == cur {
+			mark, col = "> ", widgets.Default.White
+		}
+		rows[i] = widgets.ListRow{Text: fmt.Sprintf("%s%02d  %s", mark, i+1, name), TextCol: col}
+	}
+
+	status := ""
+	if octSlot != nil {
+		status = fmt.Sprintf("Octave %+d", int(octSlot.value+0.5))
+	}
+
+	const patchRowH = 13
+	visRows := (screenH - patchRowH) / patchRowH
+	scroll := cur - visRows/2
+	if scroll < 0 {
+		scroll = 0
+	}
+	if maxScroll := len(rows) - visRows; maxScroll < 0 {
+		scroll = 0
+	} else if scroll > maxScroll {
+		scroll = maxScroll
+	}
+
+	v := widgets.ListView{
+		Rows:       rows,
+		Cursor:     cur,
+		Scroll:     scroll,
+		Breadcrumb: "BRAIDS - PRESET - encoder 1 select, encoder 2 octave",
+		Status:     status,
+	}
+	widgets.RenderList(img, widgets.Default, v, 0, screenW, patchRowH, screenH)
 	return img
 }
 
