@@ -20,6 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -38,12 +42,13 @@ type paramMeta struct {
 // trailing encoders unused — the filter envelope page below only fills 4.
 var paramPages = [][]string{
 	{"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
-	{"f_attack", "f_decay", "f_sustain", "f_release"},
+	{"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
+	{"preset", "octave_transpose"},
 }
 
 // pageNames has one more entry than paramPages: the last page is the I/O
 // picker (iopage.go), not a param page — see IsIOPage.
-var pageNames = []string{"OSC / AMP", "FILTER ENV", "I/O"}
+var pageNames = []string{"OSC / AMP", "FILTER", "PATCH", "I/O"}
 
 // paramSlot is one parameter's live state: its metadata plus the Go-side
 // value driving the plugin. The plugin's get_param has no "current value"
@@ -52,6 +57,31 @@ var pageNames = []string{"OSC / AMP", "FILTER ENV", "I/O"}
 type paramSlot struct {
 	meta  paramMeta
 	value float64
+	// accum carries leftover encoder delta between messages for an enum
+	// slot with reduced sensitivity (see enumSensitivity) — a turn that
+	// hasn't yet crossed its threshold accumulates here instead of being
+	// dropped, so slow deliberate turning still eventually lands a step.
+	accum int
+}
+
+// enumSensitivity maps an enum param's key to how much accumulated encoder
+// delta it takes to advance one option — 1 (the default, via
+// sensitivityFor) steps on every message like every other enum; a value
+// above that makes the knob "heavier". Push's own tethered app offers this
+// per-knob feel for exactly the same reason: "engine" flips through 47
+// Braids algorithms, so the lightest graze of the encoder used to jump
+// several algorithms past the one you wanted.
+var enumSensitivity = map[string]int{
+	"engine": 4,
+}
+
+// sensitivityFor returns how much accumulated delta enum key needs before
+// stepping once — see enumSensitivity.
+func sensitivityFor(key string) int {
+	if d, ok := enumSensitivity[key]; ok && d > 0 {
+		return d
+	}
+	return 1
 }
 
 // paramState guards the current page and every param's value against
@@ -93,6 +123,60 @@ func fetchChainParams(plugin *C.bridge_plugin_t) ([]paramMeta, error) {
 		}
 	}
 	return metas, nil
+}
+
+// braidsPresetFile is the subset of a .braids preset JSON file this host
+// reads — just enough to label the preset picker (see fetchPresetMeta).
+type braidsPresetFile struct {
+	Name string `json:"name"`
+}
+
+// fetchPresetMeta builds a synthetic enum paramMeta for "preset" — the
+// plugin never lists it in chain_params (it's exposed only through its own
+// ui_hierarchy browser convention, which this host doesn't use). Reading
+// the .braids files directly off disk also avoids the alternative of
+// cycling the live instance through every preset to read back its name:
+// that would call v2_apply_preset for each one, overwriting the
+// defaultParams values already sent to the instance by the time this runs.
+func fetchPresetMeta(moduleDir string) (paramMeta, error) {
+	dir := filepath.Join(moduleDir, "presets")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return paramMeta{}, fmt.Errorf("reading presets dir: %w", err)
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".braids") {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files) // load_presets (braids_plugin.cpp) loads in this same sorted order
+	names := make([]string, 0, len(files))
+	for _, fn := range files {
+		data, err := os.ReadFile(filepath.Join(dir, fn))
+		if err != nil {
+			return paramMeta{}, fmt.Errorf("reading %s: %w", fn, err)
+		}
+		var pf braidsPresetFile
+		if err := json.Unmarshal(data, &pf); err != nil {
+			return paramMeta{}, fmt.Errorf("parsing %s: %w", fn, err)
+		}
+		if pf.Name == "" {
+			pf.Name = strings.TrimSuffix(fn, ".braids")
+		}
+		names = append(names, pf.Name)
+	}
+	if len(names) == 0 {
+		return paramMeta{}, fmt.Errorf("no .braids presets found in %s", dir)
+	}
+	return paramMeta{
+		Key:     "preset",
+		Name:    "Preset",
+		Type:    "enum",
+		Min:     0,
+		Max:     float64(len(names) - 1),
+		Options: names,
+	}, nil
 }
 
 // newParamState builds the page/slot state from the plugin's own metadata
@@ -161,13 +245,20 @@ func (st *paramState) applyEncoder(idx, delta int) (key, val string, ok bool) {
 		// not ±1 (core/push3/encoder.go's DecodeRel doc). That's fine for
 		// a continuous float sweep, but for a discrete list like the
 		// engine's shapes it made one brisk flick jump 11 algorithms at
-		// once. Step by exactly one shape per encoder message instead,
-		// regardless of how hard the turn was.
-		switch {
-		case delta > 0:
+		// once. Accumulate delta instead and step by exactly one option
+		// per sensitivityFor(key) units of accumulated turn — 1 (the
+		// default) steps on every message same as before; "engine" is
+		// tuned heavier (see enumSensitivity) so it takes deliberate
+		// turning to browse its 47 algorithms.
+		div := sensitivityFor(page[idx])
+		slot.accum += delta
+		for slot.accum >= div {
 			slot.value++
-		case delta < 0:
+			slot.accum -= div
+		}
+		for slot.accum <= -div {
 			slot.value--
+			slot.accum += div
 		}
 	} else {
 		slot.value += float64(delta) * stepFor(slot.meta)

@@ -324,6 +324,16 @@ func runSupervised() {
 	if err != nil {
 		log.Fatalf("fetchChainParams: %v", err)
 	}
+	// "preset" isn't part of chain_params (the plugin only exposes it via
+	// its own ui_hierarchy browser convention) — build its metadata
+	// separately from the .braids files on disk (see fetchPresetMeta) and
+	// fold it in so it slots into paramPages like any other param.
+	presetMeta, err := fetchPresetMeta(moduleDir)
+	if err != nil {
+		log.Printf("fetchPresetMeta: %v (preset picker disabled)", err)
+	} else {
+		metas = append(metas, presetMeta)
+	}
 	params := newParamState(metas)
 
 	// rt is persistedConfig's live counterpart: watchMIDI/watchHWParams act
