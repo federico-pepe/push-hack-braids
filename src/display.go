@@ -153,7 +153,10 @@ func renderKnobGrid(st *paramState, level *levelMeter) *image.NRGBA {
 	renderTopTabs(img, mutableTheme, st.Page())
 
 	st.mu.Lock()
-	page := paramPages[st.page]
+	var page []string
+	if st.page >= 0 && st.page < len(paramPages) {
+		page = paramPages[st.page]
+	}
 	type cell struct {
 		key  string
 		slot *paramSlot

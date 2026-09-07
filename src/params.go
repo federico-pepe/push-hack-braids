@@ -38,24 +38,39 @@ type paramMeta struct {
 }
 
 // paramPages curates which params sit on which page and in which encoder
-// slot (index 0-7, left to right, matching CC 71-78). Only covers the 2
-// generic knob-grid pages (pageOscAmp/pageFilter) — PRESETS and SETTINGS
-// render and handle encoders their own way (see renderPatchPage/iopage.go).
+// slot (index 0-7, left to right, matching CC 71-78). Only covers the
+// generic knob-grid pages (pageOscAmp/pageFilter/pageCrush) — PRESETS and
+// SETTINGS render and handle encoders their own way (see
+// renderPatchPage/iopage.go). paramPages is indexed directly by page
+// constant (renderKnobGrid does paramPages[st.page]), so pagePresets and
+// pageSettings still need a (nil) placeholder here even though they never
+// read it, to keep every other page's index aligned. pageCrush is filled
+// in incrementally as more of the vendored-but-unused Braids Settings
+// params get wired up (see git log on this branch) — it has empty slots
+// for now.
 var paramPages = [][]string{
-	{"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
-	{"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
+	pageOscAmp:   {"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
+	pageFilter:   {"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
+	pagePresets:  nil,
+	pageCrush:    {"resolution", "sample_rate"},
+	pageSettings: nil,
 }
 
 // Page indices, jumped to directly by top-screen button press (CCScreenTopN)
-// — see main.go's Fixed() and pageNames below.
+// — see main.go's Fixed() and pageNames below. SETTINGS is kept last on
+// purpose (rightmost top-screen button) — any future page (e.g. more of
+// the vendored-but-unused Braids Settings params landing on their own
+// page) gets inserted here BEFORE pageSettings, not after, so SETTINGS
+// keeps that position as more pages are added.
 const (
 	pageOscAmp = iota
 	pageFilter
 	pagePresets
+	pageCrush
 	pageSettings
 )
 
-var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "SETTINGS"}
+var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "CRUSH / QUANT", "SETTINGS"}
 
 // paramSlot is one parameter's live state: its metadata plus the Go-side
 // value driving the plugin. The plugin's get_param has no "current value"

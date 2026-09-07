@@ -67,6 +67,8 @@ var defaultParams = [][2]string{
 	{"sustain", "0.8"},
 	{"release", "0.3"},
 	{"volume", "0.9"},
+	{"resolution", "6"},  // last index = 16-bit, i.e. off
+	{"sample_rate", "6"}, // last index = 96kHz, i.e. off
 }
 
 // midiHandler implements alsaseq.Handler, translating Push3's pad/button
@@ -154,7 +156,7 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		switch {
 		case cc >= push3.CCEncoder1 && cc <= push3.CCEncoder8:
 			ev = controlEvent{kind: ctlEncoder, idx: int(cc) - push3.CCEncoder1, delta: push3.DecodeRel(val)}
-		case cc >= push3.CCScreenTop1 && cc <= push3.CCScreenTop4 && val == 127:
+		case cc >= push3.CCScreenTop1 && int(cc)-int(push3.CCScreenTop1) < len(pageNames) && val == 127:
 			ev = controlEvent{kind: ctlPageJump, idx: int(cc) - push3.CCScreenTop1}
 		case cc >= push3.CCScreenBot1 && cc <= push3.CCScreenBot8 && val == 127:
 			ev = controlEvent{kind: ctlBottomPress, idx: int(cc) - push3.CCScreenBot1}

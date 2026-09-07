@@ -148,6 +148,25 @@ static const char* g_shape_names[] = {
 };
 #define NUM_SHAPES ((int)braids::MACRO_OSC_SHAPE_LAST_ACCESSIBLE_FROM_META + 1)
 
+/* Bit-crush (resolution) and downsample (sample_rate) option tables — see
+ * the decimation/mask block in v2_render_block. Both are hand-rolled enums
+ * (like "engine") since param_def_t has no options field. Last entry of
+ * each is the "off"/full-quality option and each's default. sample_rate's
+ * top 2 entries (48k/96k) exceed MOVE_SAMPLE_RATE (44.1kHz) and are
+ * effectively passthrough — the accumulator naturally no-ops above the
+ * host rate, no special-casing needed. */
+static const char* g_resolution_names[] = {
+    "2-bit", "3-bit", "4-bit", "6-bit", "8-bit", "12-bit", "16-bit"
+};
+static const int g_resolution_bits[] = { 2, 3, 4, 6, 8, 12, 16 };
+#define NUM_RESOLUTIONS ((int)(sizeof(g_resolution_names) / sizeof(g_resolution_names[0])))
+
+static const char* g_sample_rate_names[] = {
+    "4kHz", "8kHz", "16kHz", "24kHz", "32kHz", "48kHz", "96kHz"
+};
+static const int g_sample_rate_hz[] = { 4000, 8000, 16000, 24000, 32000, 48000, 96000 };
+#define NUM_SAMPLE_RATES ((int)(sizeof(g_sample_rate_names) / sizeof(g_sample_rate_names[0])))
+
 /* Preset system */
 #define MAX_PRESETS 64
 
@@ -175,6 +194,8 @@ enum BraidsParam {
     PARAM_F_SUSTAIN,
     PARAM_F_RELEASE,
     PARAM_VOLUME,
+    PARAM_RESOLUTION,
+    PARAM_SAMPLE_RATE,
     PARAM_COUNT
 };
 
@@ -218,6 +239,8 @@ static const param_def_t g_shadow_params[] = {
     {"f_sustain", "F.Sustain", PARAM_TYPE_FLOAT, PARAM_F_SUSTAIN, 0.0f, 1.0f, "filter_env", "sustain",   NULL},
     {"f_release", "F.Release", PARAM_TYPE_FLOAT, PARAM_F_RELEASE, 0.0f, 1.0f, "filter_env", "release",   NULL},
     {"volume",    "Volume",    PARAM_TYPE_FLOAT, PARAM_VOLUME,    0.0f, 1.0f, NULL,         NULL,        "fader"},
+    {"resolution",  "Resolution",  PARAM_TYPE_INT, PARAM_RESOLUTION,  0.0f, (float)(NUM_RESOLUTIONS - 1),  NULL, NULL, NULL},
+    {"sample_rate", "Sample Rate", PARAM_TYPE_INT, PARAM_SAMPLE_RATE, 0.0f, (float)(NUM_SAMPLE_RATES - 1), NULL, NULL, NULL},
 };
 
 /* =====================================================================
@@ -236,6 +259,12 @@ struct BraidsVoice {
     int active;
     int gate;
     int age;  /* For voice stealing - higher = older */
+
+    /* Downsample (sample_rate param) sample-and-hold state — see the
+     * decimation block in v2_render_block. Reset on note-on so a
+     * retriggered voice doesn't inherit stale phase from a previous note. */
+    float crush_phase;
+    int16_t crush_hold;
 };
 
 /* =====================================================================
@@ -435,6 +464,10 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_F_RELEASE] = 0.3f;
     if (json_get_number(data, "volume", &fval) == 0) p->params[PARAM_VOLUME] = fval;
     else p->params[PARAM_VOLUME] = 0.7f;
+    if (json_get_number(data, "resolution", &fval) == 0) p->params[PARAM_RESOLUTION] = fval;
+    else p->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
+    if (json_get_number(data, "sample_rate", &fval) == 0) p->params[PARAM_SAMPLE_RATE] = fval;
+    else p->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -552,6 +585,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_F_SUSTAIN] = 0.0f;
     inst->params[PARAM_F_RELEASE] = 0.3f;
     inst->params[PARAM_VOLUME] = 0.7f;
+    inst->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
+    inst->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -569,6 +604,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         inst->voices[i].note = 0;
         inst->voices[i].velocity = 0;
         inst->voices[i].age = 0;
+        inst->voices[i].crush_phase = 0.0f;
+        inst->voices[i].crush_hold = 0;
         memset(inst->voices[i].osc_buffer, 0, sizeof(inst->voices[i].osc_buffer));
         memset(inst->voices[i].sync_buffer, 0, sizeof(inst->voices[i].sync_buffer));
     }
@@ -621,6 +658,8 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
                 v->age = ++inst->voice_counter;
                 v->osc.set_pitch(note_to_pitch(note));
                 apply_params_to_voice(inst, v);
+                v->crush_phase = 0.0f;
+                v->crush_hold = 0;
                 v->osc.Strike();
                 v->amp_env.gate_on();
                 v->filt_env.gate_on();
@@ -763,6 +802,29 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
 }
 
 /* v2 API: Get parameter */
+/* Appends one hand-rolled enum entry (key/name/options[]) to a chain_params
+ * JSON buffer at offset, mirroring "engine"'s block in the chain_params
+ * handler below — used for the enums that don't fit param_def_t's
+ * options-less shape (resolution, sample_rate). Returns the new offset. */
+static int append_enum_chain_param(char *buf, int buf_len, int offset,
+                                    const char *key, const char *name,
+                                    const char* const *options, int count) {
+    offset += snprintf(buf + offset, buf_len - offset,
+        ",{\"key\":\"%s\",\"name\":\"%s\",\"type\":\"enum\",\"options\":[", key, name);
+    for (int i = 0; i < count && offset < buf_len - 50; i++) {
+        if (i > 0) offset += snprintf(buf + offset, buf_len - offset, ",");
+        buf[offset++] = '"';
+        for (const char *p = options[i]; *p && offset < buf_len - 10; p++) {
+            if (*p == '\\' || *p == '"') buf[offset++] = '\\';
+            buf[offset++] = *p;
+        }
+        buf[offset++] = '"';
+        buf[offset] = '\0';
+    }
+    offset += snprintf(buf + offset, buf_len - offset, "]}");
+    return offset;
+}
+
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     braids_instance_t *inst = (braids_instance_t*)instance;
     if (!inst) return -1;
@@ -915,6 +977,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         for (int i = 0; i < (int)PARAM_DEF_COUNT(g_shadow_params) &&
                         offset < buf_len - PARAM_HELPER_ENTRY_MARGIN; i++) {
             if (strcmp(g_shadow_params[i].key, "engine") == 0) continue;  /* Already handled */
+            if (strcmp(g_shadow_params[i].key, "resolution") == 0) continue;  /* Handled below */
+            if (strcmp(g_shadow_params[i].key, "sample_rate") == 0) continue;  /* Handled below */
             /* Float params with 0-1 range get percentage display */
             int is_pct = (g_shadow_params[i].type == PARAM_TYPE_FLOAT &&
                           g_shadow_params[i].min_val == 0.0f &&
@@ -932,6 +996,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             offset += vn;
             offset += snprintf(buf + offset, buf_len - offset, "}");
         }
+
+        /* Resolution / sample_rate as enums with named options */
+        offset = append_enum_chain_param(buf, buf_len, offset, "resolution", "Resolution",
+                                          g_resolution_names, NUM_RESOLUTIONS);
+        offset = append_enum_chain_param(buf, buf_len, offset, "sample_rate", "Sample Rate",
+                                          g_sample_rate_names, NUM_SAMPLE_RATES);
 
         /* Octave transpose */
         offset += snprintf(buf + offset, buf_len - offset,
@@ -958,6 +1028,22 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     float filt_env_amount = inst->params[PARAM_FILT_ENV];
     int use_filter = (base_cutoff < 0.99f || inst->params[PARAM_RESONANCE] > 0.01f
                       || filt_env_amount > 0.01f);
+
+    /* Bit-crush / downsample: resolve enum index -> actual bit depth / Hz
+     * once per host block (global, not per-voice). Highest index of each
+     * is full quality — skip the per-sample work entirely then. */
+    int resolution_idx = (int)inst->params[PARAM_RESOLUTION];
+    if (resolution_idx < 0) resolution_idx = 0;
+    if (resolution_idx >= NUM_RESOLUTIONS) resolution_idx = NUM_RESOLUTIONS - 1;
+    int crush_bits = g_resolution_bits[resolution_idx];
+    int use_crush = crush_bits < 16;
+    int16_t crush_mask = use_crush ? (int16_t)(~((1 << (16 - crush_bits)) - 1)) : (int16_t)0xFFFF;
+
+    int sample_rate_idx = (int)inst->params[PARAM_SAMPLE_RATE];
+    if (sample_rate_idx < 0) sample_rate_idx = 0;
+    if (sample_rate_idx >= NUM_SAMPLE_RATES) sample_rate_idx = NUM_SAMPLE_RATES - 1;
+    int target_hz = g_sample_rate_hz[sample_rate_idx];
+    int use_downsample = target_hz < MOVE_SAMPLE_RATE;
 
     /* Clear output */
     memset(out_interleaved_lr, 0, frames * 4);
@@ -1005,6 +1091,24 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 /* Apply amplitude envelope to oscillator output */
                 int32_t sample = v->osc_buffer[s];
                 sample = (int32_t)(sample * amp);
+
+                /* Downsample: sample-and-hold at target_hz. Phase
+                 * naturally never falls behind by more than one sample
+                 * even when target_hz >= MOVE_SAMPLE_RATE, so 48k/96k
+                 * options are an automatic passthrough. */
+                if (use_downsample) {
+                    v->crush_phase += (float)target_hz;
+                    if (v->crush_phase >= (float)MOVE_SAMPLE_RATE) {
+                        v->crush_phase -= (float)MOVE_SAMPLE_RATE;
+                        v->crush_hold = (int16_t)sample;
+                    }
+                    sample = v->crush_hold;
+                }
+
+                /* Bit-crush: mask off the low bits of the 16-bit sample. */
+                if (use_crush) {
+                    sample = (int16_t)sample & crush_mask;
+                }
 
                 /* Apply SVF filter with envelope modulation */
                 if (use_filter) {
