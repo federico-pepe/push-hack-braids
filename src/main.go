@@ -67,6 +67,20 @@ var defaultParams = [][2]string{
 	{"sustain", "0.8"},
 	{"release", "0.3"},
 	{"volume", "0.9"},
+	{"resolution", "6"},  // last index = 16-bit, i.e. off
+	{"sample_rate", "6"}, // last index = 96kHz, i.e. off
+	{"vco_drift", "0.0"},
+	{"signature", "0.0"},
+	{"meta_modulation", "0"},
+	{"ad_timbre", "0.0"},
+	{"ad_attack", "0.0"},
+	{"ad_decay", "0.3"},
+	{"ad_fm", "0.0"},
+	{"ad_color", "0.0"},
+	{"ad_vca", "0.0"},
+	{"quantizer_scale", "0"}, // "Off"
+	{"quantizer_root", "0"},
+	{"trig_delay", "0"},
 }
 
 // midiHandler implements alsaseq.Handler, translating Push3's pad/button
@@ -154,7 +168,7 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		switch {
 		case cc >= push3.CCEncoder1 && cc <= push3.CCEncoder8:
 			ev = controlEvent{kind: ctlEncoder, idx: int(cc) - push3.CCEncoder1, delta: push3.DecodeRel(val)}
-		case cc >= push3.CCScreenTop1 && cc <= push3.CCScreenTop4 && val == 127:
+		case cc >= push3.CCScreenTop1 && int(cc)-int(push3.CCScreenTop1) < len(pageNames) && val == 127:
 			ev = controlEvent{kind: ctlPageJump, idx: int(cc) - push3.CCScreenTop1}
 		case cc >= push3.CCScreenBot1 && cc <= push3.CCScreenBot8 && val == 127:
 			ev = controlEvent{kind: ctlBottomPress, idx: int(cc) - push3.CCScreenBot1}
@@ -360,6 +374,10 @@ func runSupervised() {
 		metas = append(metas, presetMeta)
 	}
 	params := newParamState(metas)
+	// v2_create_instance auto-loads preset 0 (if any presets exist) after
+	// the defaultParams loop above — resync so the very first frame shows
+	// real values, not defaultParams's guesses, for every param.
+	params.syncFromPluginState(plugin)
 
 	// rt is persistedConfig's live counterpart: watchBraidsPort/watchHWParams
 	// act on it, and the SETTINGS page (Shift+Device, top-screen button 4)

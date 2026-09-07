@@ -59,6 +59,10 @@ typedef plugin_api_v2_t* (*move_plugin_init_v2_fn)(const host_api_v1_t *host);
 #include "braids/macro_oscillator.h"
 #include "braids/envelope.h"
 #include "braids/svf.h"
+#include "braids/vco_jitter_source.h"
+#include "braids/signature_waveshaper.h"
+#include "braids/quantizer.h"
+#include "braids/quantizer_scales.h"
 
 /* Constants */
 #define MAX_VOICES 4
@@ -77,6 +81,17 @@ typedef plugin_api_v2_t* (*move_plugin_init_v2_fn)(const host_api_v1_t *host);
  * Scale factor = 44100/96000 ≈ 0.459375
  */
 #define ENV_RATE_SCALE (44100.0f / 96000.0f)
+
+/* Fixed seed for the "signature" waveshaper — see signature_shaper's doc
+ * on braids_instance_t. Arbitrary; only needs to be a consistent constant. */
+#define SIGNATURE_SEED 0x5A17D157u
+
+/* vco_drift's intensity scale, passed to VcoJitterSource::Render(). Picked
+ * to land "subtle to obvious" pitch instability across the param's 0-1
+ * range at this codebase's pitch units (128 per semitone, see
+ * PITCH_CORRECTION/fm_amount above) — tune by ear on hardware if it reads
+ * too subtle or too extreme. */
+#define VCO_DRIFT_SCALE 32.0f
 
 /* =====================================================================
  * Simple ADSR envelope - replaces Braids' AR-only envelope
@@ -148,6 +163,42 @@ static const char* g_shape_names[] = {
 };
 #define NUM_SHAPES ((int)braids::MACRO_OSC_SHAPE_LAST_ACCESSIBLE_FROM_META + 1)
 
+/* Bit-crush (resolution) and downsample (sample_rate) option tables — see
+ * the decimation/mask block in v2_render_block. Both are hand-rolled enums
+ * (like "engine") since param_def_t has no options field. Last entry of
+ * each is the "off"/full-quality option and each's default. sample_rate's
+ * top 2 entries (48k/96k) exceed MOVE_SAMPLE_RATE (44.1kHz) and are
+ * effectively passthrough — the accumulator naturally no-ops above the
+ * host rate, no special-casing needed. */
+static const char* g_resolution_names[] = {
+    "2-bit", "3-bit", "4-bit", "6-bit", "8-bit", "12-bit", "16-bit"
+};
+static const int g_resolution_bits[] = { 2, 3, 4, 6, 8, 12, 16 };
+#define NUM_RESOLUTIONS ((int)(sizeof(g_resolution_names) / sizeof(g_resolution_names[0])))
+
+static const char* g_sample_rate_names[] = {
+    "4kHz", "8kHz", "16kHz", "24kHz", "32kHz", "48kHz", "96kHz"
+};
+static const int g_sample_rate_hz[] = { 4000, 8000, 16000, 24000, 32000, 48000, 96000 };
+#define NUM_SAMPLE_RATES ((int)(sizeof(g_sample_rate_names) / sizeof(g_sample_rate_names[0])))
+
+/* quantizer_scale names — quantizer_scales.h's scales[] array carries no
+ * names of its own (only // comments), so this mirrors them by hand;
+ * order is positional and must match scales[] exactly (index 0 = "Off",
+ * span=0, braids::Quantizer::Configure leaves it disabled = passthrough). */
+static const char* g_scale_names[] = {
+    "Off", "Semitones", "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian",
+    "Aeolian", "Locrian", "Blues major", "Blues minor", "Pentatonic major",
+    "Pentatonic minor", "Folk", "Japanese", "Gamelan", "Gypsy", "Arabian",
+    "Flamenco", "Whole tone", "pythagorean", "1_4_eb", "1_4_e", "1_4_ea",
+    "bhairav", "gunakri", "marwa", "shree", "purvi", "bilawal", "yaman",
+    "kafi", "bhimpalasree", "darbari", "rageshree", "khamaj", "mimal",
+    "parameshwari", "rangeshwari", "gangeshwari", "kameshwari", "pa__kafi",
+    "natbhairav", "m_kauns", "bairagi", "b_todi", "chandradeep",
+    "kaushik_todi", "jogeshwari"
+};
+#define NUM_SCALES ((int)(sizeof(g_scale_names) / sizeof(g_scale_names[0])))
+
 /* Preset system */
 #define MAX_PRESETS 64
 
@@ -175,6 +226,20 @@ enum BraidsParam {
     PARAM_F_SUSTAIN,
     PARAM_F_RELEASE,
     PARAM_VOLUME,
+    PARAM_RESOLUTION,
+    PARAM_SAMPLE_RATE,
+    PARAM_VCO_DRIFT,
+    PARAM_SIGNATURE,
+    PARAM_META_MODULATION,
+    PARAM_AD_TIMBRE,
+    PARAM_AD_ATTACK,
+    PARAM_AD_DECAY,
+    PARAM_AD_FM,
+    PARAM_AD_COLOR,
+    PARAM_AD_VCA,
+    PARAM_QUANTIZER_SCALE,
+    PARAM_QUANTIZER_ROOT,
+    PARAM_TRIG_DELAY,
     PARAM_COUNT
 };
 
@@ -218,6 +283,20 @@ static const param_def_t g_shadow_params[] = {
     {"f_sustain", "F.Sustain", PARAM_TYPE_FLOAT, PARAM_F_SUSTAIN, 0.0f, 1.0f, "filter_env", "sustain",   NULL},
     {"f_release", "F.Release", PARAM_TYPE_FLOAT, PARAM_F_RELEASE, 0.0f, 1.0f, "filter_env", "release",   NULL},
     {"volume",    "Volume",    PARAM_TYPE_FLOAT, PARAM_VOLUME,    0.0f, 1.0f, NULL,         NULL,        "fader"},
+    {"resolution",  "Resolution",  PARAM_TYPE_INT, PARAM_RESOLUTION,  0.0f, (float)(NUM_RESOLUTIONS - 1),  NULL, NULL, NULL},
+    {"sample_rate", "Sample Rate", PARAM_TYPE_INT, PARAM_SAMPLE_RATE, 0.0f, (float)(NUM_SAMPLE_RATES - 1), NULL, NULL, NULL},
+    {"vco_drift", "VCO Drift", PARAM_TYPE_FLOAT, PARAM_VCO_DRIFT, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"signature", "Signature", PARAM_TYPE_FLOAT, PARAM_SIGNATURE, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"meta_modulation", "Meta Mod",  PARAM_TYPE_INT,   PARAM_META_MODULATION, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_timbre",       "AD>Timbre", PARAM_TYPE_FLOAT, PARAM_AD_TIMBRE,       0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_attack",       "AD Attack", PARAM_TYPE_FLOAT, PARAM_AD_ATTACK,       0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_decay",        "AD Decay",  PARAM_TYPE_FLOAT, PARAM_AD_DECAY,        0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_fm",           "AD>FM",     PARAM_TYPE_FLOAT, PARAM_AD_FM,           0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_color",        "AD>Color",  PARAM_TYPE_FLOAT, PARAM_AD_COLOR,        0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_vca",          "AD>VCA",    PARAM_TYPE_FLOAT, PARAM_AD_VCA,          0.0f, 1.0f, NULL, NULL, NULL},
+    {"quantizer_scale", "Scale", PARAM_TYPE_INT, PARAM_QUANTIZER_SCALE, 0.0f, (float)(NUM_SCALES - 1), NULL, NULL, NULL},
+    {"quantizer_root",  "Root",  PARAM_TYPE_INT, PARAM_QUANTIZER_ROOT,  0.0f, 11.0f,                   NULL, NULL, NULL},
+    {"trig_delay", "Trig Delay", PARAM_TYPE_INT, PARAM_TRIG_DELAY, 0.0f, 500.0f, NULL, NULL, NULL}, /* ms */
 };
 
 /* =====================================================================
@@ -229,6 +308,8 @@ struct BraidsVoice {
     SimpleADSR amp_env;
     SimpleADSR filt_env;
     braids::Svf svf;
+    braids::VcoJitterSource vco_jitter;
+    braids::Envelope ad_env; /* internal AD envelope — see ad_* params */
     int16_t osc_buffer[BRAIDS_BLOCK_SIZE];
     uint8_t sync_buffer[BRAIDS_BLOCK_SIZE];
     int note;
@@ -236,6 +317,24 @@ struct BraidsVoice {
     int active;
     int gate;
     int age;  /* For voice stealing - higher = older */
+
+    /* Downsample (sample_rate param) sample-and-hold state — see the
+     * decimation block in v2_render_block. Reset on note-on so a
+     * retriggered voice doesn't inherit stale phase from a previous note. */
+    float crush_phase;
+    int16_t crush_hold;
+
+    /* trig_delay pending-trigger state — see v2_on_midi's note-on and the
+     * countdown loop at the top of v2_render_block. A voice with a
+     * nonzero countdown is claimed (its note/velocity are stashed here)
+     * but stays active=0 until the countdown fires, so it plays no audio
+     * and is NOT excluded from find_free_voice — a second concurrent
+     * note-on can still pick the same voice and cancel this pending one.
+     * A known rough edge for a first pass, not a full distinct lifecycle
+     * state; acceptable for a musical delay effect. */
+    int trig_delay_countdown; /* samples remaining; 0 = no pending trigger */
+    int trig_delay_note;
+    int trig_delay_velocity;
 };
 
 /* =====================================================================
@@ -257,6 +356,22 @@ typedef struct {
 
     /* Render state: accumulate Braids 24-sample blocks into Move 128-sample blocks */
     int16_t render_buffer[MOVE_FRAMES_PER_BLOCK * 2]; /* stereo output */
+
+    /* signature param's waveshaper. On real hardware this is seeded from
+     * the MCU's unique serial number (a fixed per-device "character");
+     * here it's seeded once with a fixed constant at instance creation
+     * (SIGNATURE_SEED) and never rebuilt — Init() rebuilds a 257-entry
+     * table and is not real-time-safe to call from the render path, so
+     * the "signature" param controls wet/dry blend only, not the seed. */
+    braids::SignatureWaveshaper signature_shaper;
+
+    /* quantizer_scale param's Quantizer — shared across voices (its state
+     * is a small precomputed codebook, not per-voice). Configure() rebuilds
+     * that codebook (a 64-iteration loop, not free) so it's only called
+     * when quantizer_scale actually changes (see v2_render_block), tracked
+     * here against the last-applied index. -1 forces the first configure. */
+    braids::Quantizer quantizer;
+    int quantizer_scale_cached;
 } braids_instance_t;
 
 /* =====================================================================
@@ -435,6 +550,34 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_F_RELEASE] = 0.3f;
     if (json_get_number(data, "volume", &fval) == 0) p->params[PARAM_VOLUME] = fval;
     else p->params[PARAM_VOLUME] = 0.7f;
+    if (json_get_number(data, "resolution", &fval) == 0) p->params[PARAM_RESOLUTION] = fval;
+    else p->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
+    if (json_get_number(data, "sample_rate", &fval) == 0) p->params[PARAM_SAMPLE_RATE] = fval;
+    else p->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
+    if (json_get_number(data, "vco_drift", &fval) == 0) p->params[PARAM_VCO_DRIFT] = fval;
+    else p->params[PARAM_VCO_DRIFT] = 0.0f;
+    if (json_get_number(data, "signature", &fval) == 0) p->params[PARAM_SIGNATURE] = fval;
+    else p->params[PARAM_SIGNATURE] = 0.0f;
+    if (json_get_number(data, "meta_modulation", &fval) == 0) p->params[PARAM_META_MODULATION] = fval;
+    else p->params[PARAM_META_MODULATION] = 0.0f;
+    if (json_get_number(data, "ad_timbre", &fval) == 0) p->params[PARAM_AD_TIMBRE] = fval;
+    else p->params[PARAM_AD_TIMBRE] = 0.0f;
+    if (json_get_number(data, "ad_attack", &fval) == 0) p->params[PARAM_AD_ATTACK] = fval;
+    else p->params[PARAM_AD_ATTACK] = 0.0f;
+    if (json_get_number(data, "ad_decay", &fval) == 0) p->params[PARAM_AD_DECAY] = fval;
+    else p->params[PARAM_AD_DECAY] = 0.3f;
+    if (json_get_number(data, "ad_fm", &fval) == 0) p->params[PARAM_AD_FM] = fval;
+    else p->params[PARAM_AD_FM] = 0.0f;
+    if (json_get_number(data, "ad_color", &fval) == 0) p->params[PARAM_AD_COLOR] = fval;
+    else p->params[PARAM_AD_COLOR] = 0.0f;
+    if (json_get_number(data, "ad_vca", &fval) == 0) p->params[PARAM_AD_VCA] = fval;
+    else p->params[PARAM_AD_VCA] = 0.0f;
+    if (json_get_number(data, "quantizer_scale", &fval) == 0) p->params[PARAM_QUANTIZER_SCALE] = fval;
+    else p->params[PARAM_QUANTIZER_SCALE] = 0.0f;
+    if (json_get_number(data, "quantizer_root", &fval) == 0) p->params[PARAM_QUANTIZER_ROOT] = fval;
+    else p->params[PARAM_QUANTIZER_ROOT] = 0.0f;
+    if (json_get_number(data, "trig_delay", &fval) == 0) p->params[PARAM_TRIG_DELAY] = fval;
+    else p->params[PARAM_TRIG_DELAY] = 0.0f;
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -499,14 +642,30 @@ static void load_presets(braids_instance_t *inst) {
     plugin_log(msg);
 }
 
-static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v) {
+/* ad applies the internal AD envelope's current unipolar 0-1 value (see
+ * v2_render_block, rendered once per sub-block) to timbre/color — 0 at
+ * note-on before the envelope has rendered anything yet. meta_modulation
+ * gates only ad_timbre (matching original Braids firmware's own meaning
+ * of "meta modulation": routing the AD envelope into timbre specifically)
+ * — ad_color applies unconditionally, its own depth (0 by default) is the
+ * only gate it needs. */
+static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v, float ad) {
     int shape = (int)inst->params[PARAM_ENGINE];
     if (shape < 0) shape = 0;
     if (shape >= NUM_SHAPES) shape = NUM_SHAPES - 1;
     v->osc.set_shape((braids::MacroOscillatorShape)shape);
 
-    int16_t timbre = (int16_t)(inst->params[PARAM_TIMBRE] * 32767.0f);
-    int16_t color = (int16_t)(inst->params[PARAM_COLOR] * 32767.0f);
+    float timbre_f = inst->params[PARAM_TIMBRE];
+    if (inst->params[PARAM_META_MODULATION] > 0.5f) {
+        timbre_f += ad * inst->params[PARAM_AD_TIMBRE];
+    }
+    float color_f = inst->params[PARAM_COLOR] + ad * inst->params[PARAM_AD_COLOR];
+    if (timbre_f < 0.0f) timbre_f = 0.0f;
+    if (timbre_f > 1.0f) timbre_f = 1.0f;
+    if (color_f < 0.0f) color_f = 0.0f;
+    if (color_f > 1.0f) color_f = 1.0f;
+    int16_t timbre = (int16_t)(timbre_f * 32767.0f);
+    int16_t color = (int16_t)(color_f * 32767.0f);
     v->osc.set_parameters(timbre, color);
 
     /* SVF filter resonance (cutoff set per-sample in render for envelope modulation) */
@@ -524,6 +683,18 @@ static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v) {
         inst->params[PARAM_F_DECAY],
         inst->params[PARAM_F_SUSTAIN],
         inst->params[PARAM_F_RELEASE]);
+
+    /* Internal AD envelope's own rate — recomputed every sub-block (like
+     * the ADSRs above) so ad_attack/ad_decay stay live-tweakable.
+     * lut_env_portamento_increments has 128 entries, index 0 = fastest;
+     * ENV_RATE_SCALE is the same 96kHz->44.1kHz LUT correction the
+     * PITCH_CORRECTION/SimpleADSR comments describe, just never used
+     * until now since this is Braids' own envelope, not SimpleADSR's. */
+    int ad_a = (int)(inst->params[PARAM_AD_ATTACK] * 127.0f);
+    int ad_d = (int)(inst->params[PARAM_AD_DECAY] * 127.0f);
+    if (ad_a < 0) ad_a = 0; if (ad_a > 127) ad_a = 127;
+    if (ad_d < 0) ad_d = 0; if (ad_d > 127) ad_d = 127;
+    v->ad_env.Update(ad_a, ad_d, ENV_RATE_SCALE);
 }
 
 /* v2 API: Create instance */
@@ -552,6 +723,20 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_F_SUSTAIN] = 0.0f;
     inst->params[PARAM_F_RELEASE] = 0.3f;
     inst->params[PARAM_VOLUME] = 0.7f;
+    inst->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
+    inst->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
+    inst->params[PARAM_VCO_DRIFT] = 0.0f;
+    inst->params[PARAM_SIGNATURE] = 0.0f;
+    inst->params[PARAM_META_MODULATION] = 0.0f;
+    inst->params[PARAM_AD_TIMBRE] = 0.0f;
+    inst->params[PARAM_AD_ATTACK] = 0.0f;
+    inst->params[PARAM_AD_DECAY] = 0.3f;
+    inst->params[PARAM_AD_FM] = 0.0f;
+    inst->params[PARAM_AD_COLOR] = 0.0f;
+    inst->params[PARAM_AD_VCA] = 0.0f;
+    inst->params[PARAM_QUANTIZER_SCALE] = 0.0f; /* "Off" */
+    inst->params[PARAM_QUANTIZER_ROOT] = 0.0f;
+    inst->params[PARAM_TRIG_DELAY] = 0.0f;
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -564,14 +749,24 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         inst->voices[i].amp_env.init();
         inst->voices[i].filt_env.init();
         inst->voices[i].svf.Init();
+        inst->voices[i].vco_jitter.Init();
+        inst->voices[i].ad_env.Init();
         inst->voices[i].active = 0;
         inst->voices[i].gate = 0;
         inst->voices[i].note = 0;
         inst->voices[i].velocity = 0;
         inst->voices[i].age = 0;
+        inst->voices[i].crush_phase = 0.0f;
+        inst->voices[i].crush_hold = 0;
+        inst->voices[i].trig_delay_countdown = 0;
         memset(inst->voices[i].osc_buffer, 0, sizeof(inst->voices[i].osc_buffer));
         memset(inst->voices[i].sync_buffer, 0, sizeof(inst->voices[i].sync_buffer));
     }
+
+    inst->signature_shaper.Init(SIGNATURE_SEED);
+    inst->quantizer.Init();
+    inst->quantizer.Configure(braids::scales[0]); /* "Off" -> passthrough */
+    inst->quantizer_scale_cached = 0;
 
     /* Load presets from disk */
     load_presets(inst);
@@ -614,16 +809,30 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
             if (data2 > 0) {
                 int vi = find_free_voice(inst);
                 BraidsVoice *v = &inst->voices[vi];
-                v->note = note;
-                v->velocity = data2;
-                v->active = 1;
-                v->gate = 1;
-                v->age = ++inst->voice_counter;
-                v->osc.set_pitch(note_to_pitch(note));
-                apply_params_to_voice(inst, v);
-                v->osc.Strike();
-                v->amp_env.gate_on();
-                v->filt_env.gate_on();
+                float delay_ms = inst->params[PARAM_TRIG_DELAY];
+                if (delay_ms > 0.5f) {
+                    /* Defer Strike()/gate_on() — see BraidsVoice's
+                     * trig_delay_countdown doc. Voice stays active=0
+                     * (silent, not yet claimed against voice-stealing)
+                     * until the countdown in v2_render_block fires it. */
+                    v->trig_delay_note = note;
+                    v->trig_delay_velocity = data2;
+                    v->trig_delay_countdown = (int)(delay_ms * MOVE_SAMPLE_RATE / 1000.0f);
+                } else {
+                    v->note = note;
+                    v->velocity = data2;
+                    v->active = 1;
+                    v->gate = 1;
+                    v->age = ++inst->voice_counter;
+                    v->osc.set_pitch(note_to_pitch(note));
+                    apply_params_to_voice(inst, v, 0.0f); /* ad hasn't rendered anything yet */
+                    v->crush_phase = 0.0f;
+                    v->crush_hold = 0;
+                    v->osc.Strike();
+                    v->amp_env.gate_on();
+                    v->filt_env.gate_on();
+                    v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
+                }
             } else {
                 /* Note On with velocity 0 = Note Off */
                 int vi = find_voice_for_note(inst, note);
@@ -763,6 +972,29 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
 }
 
 /* v2 API: Get parameter */
+/* Appends one hand-rolled enum entry (key/name/options[]) to a chain_params
+ * JSON buffer at offset, mirroring "engine"'s block in the chain_params
+ * handler below — used for the enums that don't fit param_def_t's
+ * options-less shape (resolution, sample_rate). Returns the new offset. */
+static int append_enum_chain_param(char *buf, int buf_len, int offset,
+                                    const char *key, const char *name,
+                                    const char* const *options, int count) {
+    offset += snprintf(buf + offset, buf_len - offset,
+        ",{\"key\":\"%s\",\"name\":\"%s\",\"type\":\"enum\",\"options\":[", key, name);
+    for (int i = 0; i < count && offset < buf_len - 50; i++) {
+        if (i > 0) offset += snprintf(buf + offset, buf_len - offset, ",");
+        buf[offset++] = '"';
+        for (const char *p = options[i]; *p && offset < buf_len - 10; p++) {
+            if (*p == '\\' || *p == '"') buf[offset++] = '\\';
+            buf[offset++] = *p;
+        }
+        buf[offset++] = '"';
+        buf[offset] = '\0';
+    }
+    offset += snprintf(buf + offset, buf_len - offset, "]}");
+    return offset;
+}
+
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     braids_instance_t *inst = (braids_instance_t*)instance;
     if (!inst) return -1;
@@ -915,6 +1147,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         for (int i = 0; i < (int)PARAM_DEF_COUNT(g_shadow_params) &&
                         offset < buf_len - PARAM_HELPER_ENTRY_MARGIN; i++) {
             if (strcmp(g_shadow_params[i].key, "engine") == 0) continue;  /* Already handled */
+            if (strcmp(g_shadow_params[i].key, "resolution") == 0) continue;  /* Handled below */
+            if (strcmp(g_shadow_params[i].key, "sample_rate") == 0) continue;  /* Handled below */
+            if (strcmp(g_shadow_params[i].key, "quantizer_scale") == 0) continue;  /* Handled below */
             /* Float params with 0-1 range get percentage display */
             int is_pct = (g_shadow_params[i].type == PARAM_TYPE_FLOAT &&
                           g_shadow_params[i].min_val == 0.0f &&
@@ -932,6 +1167,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             offset += vn;
             offset += snprintf(buf + offset, buf_len - offset, "}");
         }
+
+        /* Resolution / sample_rate as enums with named options */
+        offset = append_enum_chain_param(buf, buf_len, offset, "resolution", "Resolution",
+                                          g_resolution_names, NUM_RESOLUTIONS);
+        offset = append_enum_chain_param(buf, buf_len, offset, "sample_rate", "Sample Rate",
+                                          g_sample_rate_names, NUM_SAMPLE_RATES);
+        offset = append_enum_chain_param(buf, buf_len, offset, "quantizer_scale", "Scale",
+                                          g_scale_names, NUM_SCALES);
 
         /* Octave transpose */
         offset += snprintf(buf + offset, buf_len - offset,
@@ -954,10 +1197,69 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
     float gain = inst->params[PARAM_VOLUME] / (float)MAX_VOICES;
     float fm_amount = inst->params[PARAM_FM];
+    float vco_drift = inst->params[PARAM_VCO_DRIFT];
+    float signature_amt = inst->params[PARAM_SIGNATURE];
     float base_cutoff = inst->params[PARAM_CUTOFF];
     float filt_env_amount = inst->params[PARAM_FILT_ENV];
     int use_filter = (base_cutoff < 0.99f || inst->params[PARAM_RESONANCE] > 0.01f
                       || filt_env_amount > 0.01f);
+
+    /* Bit-crush / downsample: resolve enum index -> actual bit depth / Hz
+     * once per host block (global, not per-voice). Highest index of each
+     * is full quality — skip the per-sample work entirely then. */
+    int resolution_idx = (int)inst->params[PARAM_RESOLUTION];
+    if (resolution_idx < 0) resolution_idx = 0;
+    if (resolution_idx >= NUM_RESOLUTIONS) resolution_idx = NUM_RESOLUTIONS - 1;
+    int crush_bits = g_resolution_bits[resolution_idx];
+    int use_crush = crush_bits < 16;
+    int16_t crush_mask = use_crush ? (int16_t)(~((1 << (16 - crush_bits)) - 1)) : (int16_t)0xFFFF;
+
+    int sample_rate_idx = (int)inst->params[PARAM_SAMPLE_RATE];
+    if (sample_rate_idx < 0) sample_rate_idx = 0;
+    if (sample_rate_idx >= NUM_SAMPLE_RATES) sample_rate_idx = NUM_SAMPLE_RATES - 1;
+    int target_hz = g_sample_rate_hz[sample_rate_idx];
+    int use_downsample = target_hz < MOVE_SAMPLE_RATE;
+
+    /* quantizer_scale: reconfigure the shared Quantizer only when the
+     * index actually changed — Configure() rebuilds its codebook (a
+     * 64-iteration loop), not something to redo every block. */
+    int quant_idx = (int)inst->params[PARAM_QUANTIZER_SCALE];
+    if (quant_idx < 0) quant_idx = 0;
+    if (quant_idx >= NUM_SCALES) quant_idx = NUM_SCALES - 1;
+    if (quant_idx != inst->quantizer_scale_cached) {
+        inst->quantizer.Configure(braids::scales[quant_idx]);
+        inst->quantizer_scale_cached = quant_idx;
+    }
+    int32_t quant_root = (int32_t)(inst->params[PARAM_QUANTIZER_ROOT]) << 7;
+
+    /* trig_delay: count down every voice's pending trigger by this block's
+     * frame count (host-block granularity, ~2.9ms — coarser than sample-
+     * accurate but simple and doesn't touch the active-voice loop/voice-
+     * stealing below at all, so trig_delay=0 stays byte-for-byte the
+     * original immediate-trigger code path). Firing it here, before the
+     * active-voice loop, means a trigger that completes this block starts
+     * making sound in the very same block. */
+    for (int vi = 0; vi < MAX_VOICES; vi++) {
+        BraidsVoice *v = &inst->voices[vi];
+        if (v->trig_delay_countdown <= 0) continue;
+        v->trig_delay_countdown -= frames;
+        if (v->trig_delay_countdown <= 0) {
+            v->note = v->trig_delay_note;
+            v->velocity = v->trig_delay_velocity;
+            v->active = 1;
+            v->gate = 1;
+            v->age = ++inst->voice_counter;
+            v->osc.set_pitch(note_to_pitch(v->note));
+            apply_params_to_voice(inst, v, 0.0f);
+            v->crush_phase = 0.0f;
+            v->crush_hold = 0;
+            v->osc.Strike();
+            v->amp_env.gate_on();
+            v->filt_env.gate_on();
+            v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
+            v->trig_delay_countdown = 0;
+        }
+    }
 
     /* Clear output */
     memset(out_interleaved_lr, 0, frames * 4);
@@ -967,23 +1269,38 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         BraidsVoice *v = &inst->voices[vi];
         if (!v->active) continue;
 
-        /* Update oscillator parameters */
-        apply_params_to_voice(inst, v);
-
-        /* Apply FM from mod wheel to pitch */
-        int16_t pitch = note_to_pitch(v->note);
-        if (fm_amount > 0.001f) {
-            pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
-        }
-        v->osc.set_pitch(pitch);
-
-        /* Render in 24-sample blocks */
+        /* Render in 24-sample sub-blocks */
         int rendered = 0;
         while (rendered < frames) {
             int block_size = BRAIDS_BLOCK_SIZE;
             if (rendered + block_size > frames) {
                 block_size = frames - rendered;
             }
+
+            /* Internal AD envelope: rendered exactly once per sub-block so
+             * its time base stays consistent (Render() advances its phase
+             * on every call — calling it at any other rate would make it
+             * run at the wrong speed). Its value is reused below both for
+             * pitch (ad_fm) and, held constant across this sub-block's
+             * samples, for amplitude (ad_vca) in the per-sample loop. */
+            float ad = v->ad_env.Render() / 65535.0f;
+
+            /* Update oscillator parameters and pitch once per sub-block
+             * (not once per host block) so knob turns and modulation land
+             * at ~0.54ms granularity instead of ~2.9ms. */
+            apply_params_to_voice(inst, v, ad);
+
+            int16_t pitch = (int16_t)inst->quantizer.Process(note_to_pitch(v->note), quant_root);
+            if (fm_amount > 0.001f) {
+                pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
+            }
+            if (vco_drift > 0.001f) {
+                pitch += v->vco_jitter.Render((int32_t)(vco_drift * VCO_DRIFT_SCALE));
+            }
+            if (inst->params[PARAM_AD_FM] > 0.001f) {
+                pitch += (int16_t)(ad * inst->params[PARAM_AD_FM] * 1536.0f); /* up to 12 semitones */
+            }
+            v->osc.set_pitch(pitch);
 
             /* Render oscillator */
             memset(v->sync_buffer, 0, sizeof(v->sync_buffer));
@@ -1004,6 +1321,44 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 /* Apply amplitude envelope to oscillator output */
                 int32_t sample = v->osc_buffer[s];
                 sample = (int32_t)(sample * amp);
+
+                /* AD>VCA: blend the primary amp envelope's amplitude
+                 * toward the AD envelope's own shape by ad_vca depth — 0
+                 * leaves amp untouched, 1 fully replaces it with ad's
+                 * shape for this sub-block (ad is held constant across
+                 * the sub-block, see its computation above). */
+                float ad_vca_depth = inst->params[PARAM_AD_VCA];
+                if (ad_vca_depth > 0.001f) {
+                    float vca_mix = amp + (ad - amp) * ad_vca_depth;
+                    sample = (int32_t)(v->osc_buffer[s] * vca_mix);
+                }
+
+                /* Downsample: sample-and-hold at target_hz. Phase
+                 * naturally never falls behind by more than one sample
+                 * even when target_hz >= MOVE_SAMPLE_RATE, so 48k/96k
+                 * options are an automatic passthrough. */
+                if (use_downsample) {
+                    v->crush_phase += (float)target_hz;
+                    if (v->crush_phase >= (float)MOVE_SAMPLE_RATE) {
+                        v->crush_phase -= (float)MOVE_SAMPLE_RATE;
+                        v->crush_hold = (int16_t)sample;
+                    }
+                    sample = v->crush_hold;
+                }
+
+                /* Bit-crush: mask off the low bits of the 16-bit sample. */
+                if (use_crush) {
+                    sample = (int16_t)sample & crush_mask;
+                }
+
+                /* Signature waveshaper: wet/dry blend by signature_amt —
+                 * the table itself is fixed (see signature_shaper's doc),
+                 * the knob only controls how much of its character mixes
+                 * in. */
+                if (signature_amt > 0.001f) {
+                    int32_t shaped = inst->signature_shaper.Transform((int16_t)sample);
+                    sample = sample + (int32_t)((shaped - sample) * signature_amt);
+                }
 
                 /* Apply SVF filter with envelope modulation */
                 if (use_filter) {

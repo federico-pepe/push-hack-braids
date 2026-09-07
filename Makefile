@@ -35,7 +35,7 @@ build:
 build-dsp:
 	@echo "Building dsp.so (native x86_64, via Docker)..."
 	@mkdir -p build
-	docker run --rm --platform linux/amd64 -v "$(REPO_ROOT)":/work -w /work debian:bullseye sh -c '\
+	docker run --rm --platform linux/amd64 -v "$(REPO_ROOT)":/work -w /work debian:bookworm sh -c '\
 	  apt-get update -qq && apt-get install -qq -y g++ >/dev/null && \
 	  for s in $(BRAIDS_SRCS); do \
 	    g++ -O3 -fPIC -std=c++14 -DTEST -I$(BRAIDS_DIR)/dsp -c "$$s" -o "build/$$(basename "$$s" | sed "s/\.[^.]*$$/.o/")"; \

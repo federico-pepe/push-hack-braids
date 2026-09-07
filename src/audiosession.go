@@ -167,6 +167,11 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 						if ev.idx == 0 { // bottom-1 = Load
 							if idx, ok := params.loadStagedPreset(); ok {
 								cSetParam(plugin, "preset", fmt.Sprintf("%d", idx))
+								// v2_apply_preset just overwrote every param
+								// on the plugin side in one call — resync so
+								// every knob's on-screen value matches, not
+								// just "preset" itself.
+								params.syncFromPluginState(plugin)
 							}
 						}
 					case pageSettings:
