@@ -374,6 +374,10 @@ func runSupervised() {
 		metas = append(metas, presetMeta)
 	}
 	params := newParamState(metas)
+	// v2_create_instance auto-loads preset 0 (if any presets exist) after
+	// the defaultParams loop above — resync so the very first frame shows
+	// real values, not defaultParams's guesses, for every param.
+	params.syncFromPluginState(plugin)
 
 	// rt is persistedConfig's live counterpart: watchBraidsPort/watchHWParams
 	// act on it, and the SETTINGS page (Shift+Device, top-screen button 4)

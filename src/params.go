@@ -51,28 +51,28 @@ type paramMeta struct {
 var paramPages = [][]string{
 	pageOscAmp:   {"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
 	pageFilter:   {"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
-	pagePresets:  nil,
 	pageCrush:    {"resolution", "sample_rate", "signature", "quantizer_scale", "quantizer_root", "trig_delay"},
 	pageAD:       {"meta_modulation", "ad_timbre", "ad_fm", "ad_color", "ad_vca", "ad_attack", "ad_decay", "vco_drift"},
+	pagePresets:  nil,
 	pageSettings: nil,
 }
 
 // Page indices, jumped to directly by top-screen button press (CCScreenTopN)
 // — see main.go's Fixed() and pageNames below. SETTINGS is kept last on
-// purpose (rightmost top-screen button) — any future page (e.g. more of
-// the vendored-but-unused Braids Settings params landing on their own
-// page) gets inserted here BEFORE pageSettings, not after, so SETTINGS
-// keeps that position as more pages are added.
+// purpose (rightmost top-screen button), with PRESETS right before it —
+// any future page (e.g. more of the vendored-but-unused Braids Settings
+// params landing on their own page) gets inserted BEFORE pagePresets, not
+// after, so PRESETS/SETTINGS keep that order as more pages are added.
 const (
 	pageOscAmp = iota
 	pageFilter
-	pagePresets
 	pageCrush
 	pageAD
+	pagePresets
 	pageSettings
 )
 
-var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "CRUSH / QUANT", "AD / DRIFT", "SETTINGS"}
+var pageNames = []string{"OSC / AMP", "FILTER", "CRUSH / QUANT", "AD / DRIFT", "PRESETS", "SETTINGS"}
 
 // paramSlot is one parameter's live state: its metadata plus the Go-side
 // value driving the plugin. The plugin's get_param has no "current value"
@@ -156,6 +156,47 @@ func fetchChainParams(plugin *C.bridge_plugin_t) ([]paramMeta, error) {
 		}
 	}
 	return metas, nil
+}
+
+// syncFromPluginState re-reads the plugin's own get_param("state") — the
+// same JSON used for patch save/load — and overwrites every matching slot's
+// value with it. Needed because paramSlot.value is normally the single
+// source of truth (params.go's doc: the plugin has no per-param "current
+// value" query), but a preset load bypasses that: v2_apply_preset
+// overwrites the plugin's entire params[] array in one C call, and without
+// this, every knob's on-screen value goes stale until the user happens to
+// touch it — silently reverting whatever the preset just set the moment
+// they do, since nudgeSlotLocked starts from the stale value. Also used
+// right after plugin creation, since v2_create_instance auto-loads preset 0
+// (if any presets exist) after defaultParams's forced set_param calls, and
+// the same staleness applies to the very first frame drawn.
+func (st *paramState) syncFromPluginState(plugin *C.bridge_plugin_t) {
+	const bufLen = 8192
+	buf := make([]byte, bufLen)
+	key := C.CString("state")
+	defer C.free(unsafe.Pointer(key))
+	n := C.bridge_plugin_get_param(plugin, key, (*C.char)(unsafe.Pointer(&buf[0])), C.int(bufLen))
+	if n < 0 {
+		log.Printf("syncFromPluginState: get_param(state) failed")
+		return
+	}
+	var values map[string]float64
+	if err := json.Unmarshal(buf[:n], &values); err != nil {
+		log.Printf("syncFromPluginState: parse state JSON: %v", err)
+		return
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for key, val := range values {
+		if slot, ok := st.slots[key]; ok {
+			slot.value = val
+		}
+	}
+	if presetSlot, ok := st.slots["preset"]; ok {
+		st.presetCursor = int(presetSlot.value + 0.5)
+	}
+	st.dirty = true
 }
 
 // braidsPresetFile is the subset of a .braids preset JSON file this host
