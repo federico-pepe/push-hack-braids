@@ -78,6 +78,8 @@ var defaultParams = [][2]string{
 	{"ad_fm", "0.0"},
 	{"ad_color", "0.0"},
 	{"ad_vca", "0.0"},
+	{"quantizer_scale", "0"}, // "Off"
+	{"quantizer_root", "0"},
 }
 
 // midiHandler implements alsaseq.Handler, translating Push3's pad/button

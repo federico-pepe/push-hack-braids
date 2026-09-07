@@ -61,6 +61,8 @@ typedef plugin_api_v2_t* (*move_plugin_init_v2_fn)(const host_api_v1_t *host);
 #include "braids/svf.h"
 #include "braids/vco_jitter_source.h"
 #include "braids/signature_waveshaper.h"
+#include "braids/quantizer.h"
+#include "braids/quantizer_scales.h"
 
 /* Constants */
 #define MAX_VOICES 4
@@ -180,6 +182,23 @@ static const char* g_sample_rate_names[] = {
 static const int g_sample_rate_hz[] = { 4000, 8000, 16000, 24000, 32000, 48000, 96000 };
 #define NUM_SAMPLE_RATES ((int)(sizeof(g_sample_rate_names) / sizeof(g_sample_rate_names[0])))
 
+/* quantizer_scale names — quantizer_scales.h's scales[] array carries no
+ * names of its own (only // comments), so this mirrors them by hand;
+ * order is positional and must match scales[] exactly (index 0 = "Off",
+ * span=0, braids::Quantizer::Configure leaves it disabled = passthrough). */
+static const char* g_scale_names[] = {
+    "Off", "Semitones", "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian",
+    "Aeolian", "Locrian", "Blues major", "Blues minor", "Pentatonic major",
+    "Pentatonic minor", "Folk", "Japanese", "Gamelan", "Gypsy", "Arabian",
+    "Flamenco", "Whole tone", "pythagorean", "1_4_eb", "1_4_e", "1_4_ea",
+    "bhairav", "gunakri", "marwa", "shree", "purvi", "bilawal", "yaman",
+    "kafi", "bhimpalasree", "darbari", "rageshree", "khamaj", "mimal",
+    "parameshwari", "rangeshwari", "gangeshwari", "kameshwari", "pa__kafi",
+    "natbhairav", "m_kauns", "bairagi", "b_todi", "chandradeep",
+    "kaushik_todi", "jogeshwari"
+};
+#define NUM_SCALES ((int)(sizeof(g_scale_names) / sizeof(g_scale_names[0])))
+
 /* Preset system */
 #define MAX_PRESETS 64
 
@@ -218,6 +237,8 @@ enum BraidsParam {
     PARAM_AD_FM,
     PARAM_AD_COLOR,
     PARAM_AD_VCA,
+    PARAM_QUANTIZER_SCALE,
+    PARAM_QUANTIZER_ROOT,
     PARAM_COUNT
 };
 
@@ -272,6 +293,8 @@ static const param_def_t g_shadow_params[] = {
     {"ad_fm",           "AD>FM",     PARAM_TYPE_FLOAT, PARAM_AD_FM,           0.0f, 1.0f, NULL, NULL, NULL},
     {"ad_color",        "AD>Color",  PARAM_TYPE_FLOAT, PARAM_AD_COLOR,        0.0f, 1.0f, NULL, NULL, NULL},
     {"ad_vca",          "AD>VCA",    PARAM_TYPE_FLOAT, PARAM_AD_VCA,          0.0f, 1.0f, NULL, NULL, NULL},
+    {"quantizer_scale", "Scale", PARAM_TYPE_INT, PARAM_QUANTIZER_SCALE, 0.0f, (float)(NUM_SCALES - 1), NULL, NULL, NULL},
+    {"quantizer_root",  "Root",  PARAM_TYPE_INT, PARAM_QUANTIZER_ROOT,  0.0f, 11.0f,                   NULL, NULL, NULL},
 };
 
 /* =====================================================================
@@ -327,6 +350,14 @@ typedef struct {
      * table and is not real-time-safe to call from the render path, so
      * the "signature" param controls wet/dry blend only, not the seed. */
     braids::SignatureWaveshaper signature_shaper;
+
+    /* quantizer_scale param's Quantizer — shared across voices (its state
+     * is a small precomputed codebook, not per-voice). Configure() rebuilds
+     * that codebook (a 64-iteration loop, not free) so it's only called
+     * when quantizer_scale actually changes (see v2_render_block), tracked
+     * here against the last-applied index. -1 forces the first configure. */
+    braids::Quantizer quantizer;
+    int quantizer_scale_cached;
 } braids_instance_t;
 
 /* =====================================================================
@@ -527,6 +558,10 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_AD_COLOR] = 0.0f;
     if (json_get_number(data, "ad_vca", &fval) == 0) p->params[PARAM_AD_VCA] = fval;
     else p->params[PARAM_AD_VCA] = 0.0f;
+    if (json_get_number(data, "quantizer_scale", &fval) == 0) p->params[PARAM_QUANTIZER_SCALE] = fval;
+    else p->params[PARAM_QUANTIZER_SCALE] = 0.0f;
+    if (json_get_number(data, "quantizer_root", &fval) == 0) p->params[PARAM_QUANTIZER_ROOT] = fval;
+    else p->params[PARAM_QUANTIZER_ROOT] = 0.0f;
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -683,6 +718,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_AD_FM] = 0.0f;
     inst->params[PARAM_AD_COLOR] = 0.0f;
     inst->params[PARAM_AD_VCA] = 0.0f;
+    inst->params[PARAM_QUANTIZER_SCALE] = 0.0f; /* "Off" */
+    inst->params[PARAM_QUANTIZER_ROOT] = 0.0f;
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -709,6 +746,9 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     }
 
     inst->signature_shaper.Init(SIGNATURE_SEED);
+    inst->quantizer.Init();
+    inst->quantizer.Configure(braids::scales[0]); /* "Off" -> passthrough */
+    inst->quantizer_scale_cached = 0;
 
     /* Load presets from disk */
     load_presets(inst);
@@ -1080,6 +1120,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             if (strcmp(g_shadow_params[i].key, "engine") == 0) continue;  /* Already handled */
             if (strcmp(g_shadow_params[i].key, "resolution") == 0) continue;  /* Handled below */
             if (strcmp(g_shadow_params[i].key, "sample_rate") == 0) continue;  /* Handled below */
+            if (strcmp(g_shadow_params[i].key, "quantizer_scale") == 0) continue;  /* Handled below */
             /* Float params with 0-1 range get percentage display */
             int is_pct = (g_shadow_params[i].type == PARAM_TYPE_FLOAT &&
                           g_shadow_params[i].min_val == 0.0f &&
@@ -1103,6 +1144,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                                           g_resolution_names, NUM_RESOLUTIONS);
         offset = append_enum_chain_param(buf, buf_len, offset, "sample_rate", "Sample Rate",
                                           g_sample_rate_names, NUM_SAMPLE_RATES);
+        offset = append_enum_chain_param(buf, buf_len, offset, "quantizer_scale", "Scale",
+                                          g_scale_names, NUM_SCALES);
 
         /* Octave transpose */
         offset += snprintf(buf + offset, buf_len - offset,
@@ -1148,6 +1191,18 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     int target_hz = g_sample_rate_hz[sample_rate_idx];
     int use_downsample = target_hz < MOVE_SAMPLE_RATE;
 
+    /* quantizer_scale: reconfigure the shared Quantizer only when the
+     * index actually changed — Configure() rebuilds its codebook (a
+     * 64-iteration loop), not something to redo every block. */
+    int quant_idx = (int)inst->params[PARAM_QUANTIZER_SCALE];
+    if (quant_idx < 0) quant_idx = 0;
+    if (quant_idx >= NUM_SCALES) quant_idx = NUM_SCALES - 1;
+    if (quant_idx != inst->quantizer_scale_cached) {
+        inst->quantizer.Configure(braids::scales[quant_idx]);
+        inst->quantizer_scale_cached = quant_idx;
+    }
+    int32_t quant_root = (int32_t)(inst->params[PARAM_QUANTIZER_ROOT]) << 7;
+
     /* Clear output */
     memset(out_interleaved_lr, 0, frames * 4);
 
@@ -1177,7 +1232,7 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
              * at ~0.54ms granularity instead of ~2.9ms. */
             apply_params_to_voice(inst, v, ad);
 
-            int16_t pitch = note_to_pitch(v->note);
+            int16_t pitch = (int16_t)inst->quantizer.Process(note_to_pitch(v->note), quant_root);
             if (fm_amount > 0.001f) {
                 pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
             }

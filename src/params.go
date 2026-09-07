@@ -52,7 +52,7 @@ var paramPages = [][]string{
 	pageOscAmp:   {"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
 	pageFilter:   {"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
 	pagePresets:  nil,
-	pageCrush:    {"resolution", "sample_rate", "signature"},
+	pageCrush:    {"resolution", "sample_rate", "signature", "quantizer_scale", "quantizer_root"},
 	pageAD:       {"meta_modulation", "ad_timbre", "ad_fm", "ad_color", "ad_vca", "ad_attack", "ad_decay", "vco_drift"},
 	pageSettings: nil,
 }
@@ -99,6 +99,7 @@ var enumSensitivity = map[string]int{
 	"engine":           4,
 	"preset":           4,
 	"octave_transpose": 4,
+	"quantizer_scale":  4, // 49 scales — as heavy as "engine"'s 47 shapes
 }
 
 // sensitivityFor returns how much accumulated delta enum key needs before
