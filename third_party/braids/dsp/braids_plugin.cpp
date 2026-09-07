@@ -239,6 +239,7 @@ enum BraidsParam {
     PARAM_AD_VCA,
     PARAM_QUANTIZER_SCALE,
     PARAM_QUANTIZER_ROOT,
+    PARAM_TRIG_DELAY,
     PARAM_COUNT
 };
 
@@ -295,6 +296,7 @@ static const param_def_t g_shadow_params[] = {
     {"ad_vca",          "AD>VCA",    PARAM_TYPE_FLOAT, PARAM_AD_VCA,          0.0f, 1.0f, NULL, NULL, NULL},
     {"quantizer_scale", "Scale", PARAM_TYPE_INT, PARAM_QUANTIZER_SCALE, 0.0f, (float)(NUM_SCALES - 1), NULL, NULL, NULL},
     {"quantizer_root",  "Root",  PARAM_TYPE_INT, PARAM_QUANTIZER_ROOT,  0.0f, 11.0f,                   NULL, NULL, NULL},
+    {"trig_delay", "Trig Delay", PARAM_TYPE_INT, PARAM_TRIG_DELAY, 0.0f, 500.0f, NULL, NULL, NULL}, /* ms */
 };
 
 /* =====================================================================
@@ -321,6 +323,18 @@ struct BraidsVoice {
      * retriggered voice doesn't inherit stale phase from a previous note. */
     float crush_phase;
     int16_t crush_hold;
+
+    /* trig_delay pending-trigger state — see v2_on_midi's note-on and the
+     * countdown loop at the top of v2_render_block. A voice with a
+     * nonzero countdown is claimed (its note/velocity are stashed here)
+     * but stays active=0 until the countdown fires, so it plays no audio
+     * and is NOT excluded from find_free_voice — a second concurrent
+     * note-on can still pick the same voice and cancel this pending one.
+     * A known rough edge for a first pass, not a full distinct lifecycle
+     * state; acceptable for a musical delay effect. */
+    int trig_delay_countdown; /* samples remaining; 0 = no pending trigger */
+    int trig_delay_note;
+    int trig_delay_velocity;
 };
 
 /* =====================================================================
@@ -562,6 +576,8 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_QUANTIZER_SCALE] = 0.0f;
     if (json_get_number(data, "quantizer_root", &fval) == 0) p->params[PARAM_QUANTIZER_ROOT] = fval;
     else p->params[PARAM_QUANTIZER_ROOT] = 0.0f;
+    if (json_get_number(data, "trig_delay", &fval) == 0) p->params[PARAM_TRIG_DELAY] = fval;
+    else p->params[PARAM_TRIG_DELAY] = 0.0f;
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -720,6 +736,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_AD_VCA] = 0.0f;
     inst->params[PARAM_QUANTIZER_SCALE] = 0.0f; /* "Off" */
     inst->params[PARAM_QUANTIZER_ROOT] = 0.0f;
+    inst->params[PARAM_TRIG_DELAY] = 0.0f;
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -741,6 +758,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         inst->voices[i].age = 0;
         inst->voices[i].crush_phase = 0.0f;
         inst->voices[i].crush_hold = 0;
+        inst->voices[i].trig_delay_countdown = 0;
         memset(inst->voices[i].osc_buffer, 0, sizeof(inst->voices[i].osc_buffer));
         memset(inst->voices[i].sync_buffer, 0, sizeof(inst->voices[i].sync_buffer));
     }
@@ -791,19 +809,30 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
             if (data2 > 0) {
                 int vi = find_free_voice(inst);
                 BraidsVoice *v = &inst->voices[vi];
-                v->note = note;
-                v->velocity = data2;
-                v->active = 1;
-                v->gate = 1;
-                v->age = ++inst->voice_counter;
-                v->osc.set_pitch(note_to_pitch(note));
-                apply_params_to_voice(inst, v, 0.0f); /* ad hasn't rendered anything yet */
-                v->crush_phase = 0.0f;
-                v->crush_hold = 0;
-                v->osc.Strike();
-                v->amp_env.gate_on();
-                v->filt_env.gate_on();
-                v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
+                float delay_ms = inst->params[PARAM_TRIG_DELAY];
+                if (delay_ms > 0.5f) {
+                    /* Defer Strike()/gate_on() — see BraidsVoice's
+                     * trig_delay_countdown doc. Voice stays active=0
+                     * (silent, not yet claimed against voice-stealing)
+                     * until the countdown in v2_render_block fires it. */
+                    v->trig_delay_note = note;
+                    v->trig_delay_velocity = data2;
+                    v->trig_delay_countdown = (int)(delay_ms * MOVE_SAMPLE_RATE / 1000.0f);
+                } else {
+                    v->note = note;
+                    v->velocity = data2;
+                    v->active = 1;
+                    v->gate = 1;
+                    v->age = ++inst->voice_counter;
+                    v->osc.set_pitch(note_to_pitch(note));
+                    apply_params_to_voice(inst, v, 0.0f); /* ad hasn't rendered anything yet */
+                    v->crush_phase = 0.0f;
+                    v->crush_hold = 0;
+                    v->osc.Strike();
+                    v->amp_env.gate_on();
+                    v->filt_env.gate_on();
+                    v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
+                }
             } else {
                 /* Note On with velocity 0 = Note Off */
                 int vi = find_voice_for_note(inst, note);
@@ -1202,6 +1231,35 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         inst->quantizer_scale_cached = quant_idx;
     }
     int32_t quant_root = (int32_t)(inst->params[PARAM_QUANTIZER_ROOT]) << 7;
+
+    /* trig_delay: count down every voice's pending trigger by this block's
+     * frame count (host-block granularity, ~2.9ms — coarser than sample-
+     * accurate but simple and doesn't touch the active-voice loop/voice-
+     * stealing below at all, so trig_delay=0 stays byte-for-byte the
+     * original immediate-trigger code path). Firing it here, before the
+     * active-voice loop, means a trigger that completes this block starts
+     * making sound in the very same block. */
+    for (int vi = 0; vi < MAX_VOICES; vi++) {
+        BraidsVoice *v = &inst->voices[vi];
+        if (v->trig_delay_countdown <= 0) continue;
+        v->trig_delay_countdown -= frames;
+        if (v->trig_delay_countdown <= 0) {
+            v->note = v->trig_delay_note;
+            v->velocity = v->trig_delay_velocity;
+            v->active = 1;
+            v->gate = 1;
+            v->age = ++inst->voice_counter;
+            v->osc.set_pitch(note_to_pitch(v->note));
+            apply_params_to_voice(inst, v, 0.0f);
+            v->crush_phase = 0.0f;
+            v->crush_hold = 0;
+            v->osc.Strike();
+            v->amp_env.gate_on();
+            v->filt_env.gate_on();
+            v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
+            v->trig_delay_countdown = 0;
+        }
+    }
 
     /* Clear output */
     memset(out_interleaved_lr, 0, frames * 4);

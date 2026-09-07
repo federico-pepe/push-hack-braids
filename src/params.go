@@ -52,7 +52,7 @@ var paramPages = [][]string{
 	pageOscAmp:   {"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
 	pageFilter:   {"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
 	pagePresets:  nil,
-	pageCrush:    {"resolution", "sample_rate", "signature", "quantizer_scale", "quantizer_root"},
+	pageCrush:    {"resolution", "sample_rate", "signature", "quantizer_scale", "quantizer_root", "trig_delay"},
 	pageAD:       {"meta_modulation", "ad_timbre", "ad_fm", "ad_color", "ad_vca", "ad_attack", "ad_decay", "vco_drift"},
 	pageSettings: nil,
 }
