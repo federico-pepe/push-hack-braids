@@ -71,6 +71,13 @@ var defaultParams = [][2]string{
 	{"sample_rate", "6"}, // last index = 96kHz, i.e. off
 	{"vco_drift", "0.0"},
 	{"signature", "0.0"},
+	{"meta_modulation", "0"},
+	{"ad_timbre", "0.0"},
+	{"ad_attack", "0.0"},
+	{"ad_decay", "0.3"},
+	{"ad_fm", "0.0"},
+	{"ad_color", "0.0"},
+	{"ad_vca", "0.0"},
 }
 
 // midiHandler implements alsaseq.Handler, translating Push3's pad/button

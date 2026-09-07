@@ -211,6 +211,13 @@ enum BraidsParam {
     PARAM_SAMPLE_RATE,
     PARAM_VCO_DRIFT,
     PARAM_SIGNATURE,
+    PARAM_META_MODULATION,
+    PARAM_AD_TIMBRE,
+    PARAM_AD_ATTACK,
+    PARAM_AD_DECAY,
+    PARAM_AD_FM,
+    PARAM_AD_COLOR,
+    PARAM_AD_VCA,
     PARAM_COUNT
 };
 
@@ -258,6 +265,13 @@ static const param_def_t g_shadow_params[] = {
     {"sample_rate", "Sample Rate", PARAM_TYPE_INT, PARAM_SAMPLE_RATE, 0.0f, (float)(NUM_SAMPLE_RATES - 1), NULL, NULL, NULL},
     {"vco_drift", "VCO Drift", PARAM_TYPE_FLOAT, PARAM_VCO_DRIFT, 0.0f, 1.0f, NULL, NULL, NULL},
     {"signature", "Signature", PARAM_TYPE_FLOAT, PARAM_SIGNATURE, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"meta_modulation", "Meta Mod",  PARAM_TYPE_INT,   PARAM_META_MODULATION, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_timbre",       "AD>Timbre", PARAM_TYPE_FLOAT, PARAM_AD_TIMBRE,       0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_attack",       "AD Attack", PARAM_TYPE_FLOAT, PARAM_AD_ATTACK,       0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_decay",        "AD Decay",  PARAM_TYPE_FLOAT, PARAM_AD_DECAY,        0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_fm",           "AD>FM",     PARAM_TYPE_FLOAT, PARAM_AD_FM,           0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_color",        "AD>Color",  PARAM_TYPE_FLOAT, PARAM_AD_COLOR,        0.0f, 1.0f, NULL, NULL, NULL},
+    {"ad_vca",          "AD>VCA",    PARAM_TYPE_FLOAT, PARAM_AD_VCA,          0.0f, 1.0f, NULL, NULL, NULL},
 };
 
 /* =====================================================================
@@ -270,6 +284,7 @@ struct BraidsVoice {
     SimpleADSR filt_env;
     braids::Svf svf;
     braids::VcoJitterSource vco_jitter;
+    braids::Envelope ad_env; /* internal AD envelope — see ad_* params */
     int16_t osc_buffer[BRAIDS_BLOCK_SIZE];
     uint8_t sync_buffer[BRAIDS_BLOCK_SIZE];
     int note;
@@ -498,6 +513,20 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_VCO_DRIFT] = 0.0f;
     if (json_get_number(data, "signature", &fval) == 0) p->params[PARAM_SIGNATURE] = fval;
     else p->params[PARAM_SIGNATURE] = 0.0f;
+    if (json_get_number(data, "meta_modulation", &fval) == 0) p->params[PARAM_META_MODULATION] = fval;
+    else p->params[PARAM_META_MODULATION] = 0.0f;
+    if (json_get_number(data, "ad_timbre", &fval) == 0) p->params[PARAM_AD_TIMBRE] = fval;
+    else p->params[PARAM_AD_TIMBRE] = 0.0f;
+    if (json_get_number(data, "ad_attack", &fval) == 0) p->params[PARAM_AD_ATTACK] = fval;
+    else p->params[PARAM_AD_ATTACK] = 0.0f;
+    if (json_get_number(data, "ad_decay", &fval) == 0) p->params[PARAM_AD_DECAY] = fval;
+    else p->params[PARAM_AD_DECAY] = 0.3f;
+    if (json_get_number(data, "ad_fm", &fval) == 0) p->params[PARAM_AD_FM] = fval;
+    else p->params[PARAM_AD_FM] = 0.0f;
+    if (json_get_number(data, "ad_color", &fval) == 0) p->params[PARAM_AD_COLOR] = fval;
+    else p->params[PARAM_AD_COLOR] = 0.0f;
+    if (json_get_number(data, "ad_vca", &fval) == 0) p->params[PARAM_AD_VCA] = fval;
+    else p->params[PARAM_AD_VCA] = 0.0f;
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -562,14 +591,30 @@ static void load_presets(braids_instance_t *inst) {
     plugin_log(msg);
 }
 
-static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v) {
+/* ad applies the internal AD envelope's current unipolar 0-1 value (see
+ * v2_render_block, rendered once per sub-block) to timbre/color — 0 at
+ * note-on before the envelope has rendered anything yet. meta_modulation
+ * gates only ad_timbre (matching original Braids firmware's own meaning
+ * of "meta modulation": routing the AD envelope into timbre specifically)
+ * — ad_color applies unconditionally, its own depth (0 by default) is the
+ * only gate it needs. */
+static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v, float ad) {
     int shape = (int)inst->params[PARAM_ENGINE];
     if (shape < 0) shape = 0;
     if (shape >= NUM_SHAPES) shape = NUM_SHAPES - 1;
     v->osc.set_shape((braids::MacroOscillatorShape)shape);
 
-    int16_t timbre = (int16_t)(inst->params[PARAM_TIMBRE] * 32767.0f);
-    int16_t color = (int16_t)(inst->params[PARAM_COLOR] * 32767.0f);
+    float timbre_f = inst->params[PARAM_TIMBRE];
+    if (inst->params[PARAM_META_MODULATION] > 0.5f) {
+        timbre_f += ad * inst->params[PARAM_AD_TIMBRE];
+    }
+    float color_f = inst->params[PARAM_COLOR] + ad * inst->params[PARAM_AD_COLOR];
+    if (timbre_f < 0.0f) timbre_f = 0.0f;
+    if (timbre_f > 1.0f) timbre_f = 1.0f;
+    if (color_f < 0.0f) color_f = 0.0f;
+    if (color_f > 1.0f) color_f = 1.0f;
+    int16_t timbre = (int16_t)(timbre_f * 32767.0f);
+    int16_t color = (int16_t)(color_f * 32767.0f);
     v->osc.set_parameters(timbre, color);
 
     /* SVF filter resonance (cutoff set per-sample in render for envelope modulation) */
@@ -587,6 +632,18 @@ static void apply_params_to_voice(braids_instance_t *inst, BraidsVoice *v) {
         inst->params[PARAM_F_DECAY],
         inst->params[PARAM_F_SUSTAIN],
         inst->params[PARAM_F_RELEASE]);
+
+    /* Internal AD envelope's own rate — recomputed every sub-block (like
+     * the ADSRs above) so ad_attack/ad_decay stay live-tweakable.
+     * lut_env_portamento_increments has 128 entries, index 0 = fastest;
+     * ENV_RATE_SCALE is the same 96kHz->44.1kHz LUT correction the
+     * PITCH_CORRECTION/SimpleADSR comments describe, just never used
+     * until now since this is Braids' own envelope, not SimpleADSR's. */
+    int ad_a = (int)(inst->params[PARAM_AD_ATTACK] * 127.0f);
+    int ad_d = (int)(inst->params[PARAM_AD_DECAY] * 127.0f);
+    if (ad_a < 0) ad_a = 0; if (ad_a > 127) ad_a = 127;
+    if (ad_d < 0) ad_d = 0; if (ad_d > 127) ad_d = 127;
+    v->ad_env.Update(ad_a, ad_d, ENV_RATE_SCALE);
 }
 
 /* v2 API: Create instance */
@@ -619,6 +676,13 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
     inst->params[PARAM_VCO_DRIFT] = 0.0f;
     inst->params[PARAM_SIGNATURE] = 0.0f;
+    inst->params[PARAM_META_MODULATION] = 0.0f;
+    inst->params[PARAM_AD_TIMBRE] = 0.0f;
+    inst->params[PARAM_AD_ATTACK] = 0.0f;
+    inst->params[PARAM_AD_DECAY] = 0.3f;
+    inst->params[PARAM_AD_FM] = 0.0f;
+    inst->params[PARAM_AD_COLOR] = 0.0f;
+    inst->params[PARAM_AD_VCA] = 0.0f;
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -632,6 +696,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         inst->voices[i].filt_env.init();
         inst->voices[i].svf.Init();
         inst->voices[i].vco_jitter.Init();
+        inst->voices[i].ad_env.Init();
         inst->voices[i].active = 0;
         inst->voices[i].gate = 0;
         inst->voices[i].note = 0;
@@ -692,12 +757,13 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
                 v->gate = 1;
                 v->age = ++inst->voice_counter;
                 v->osc.set_pitch(note_to_pitch(note));
-                apply_params_to_voice(inst, v);
+                apply_params_to_voice(inst, v, 0.0f); /* ad hasn't rendered anything yet */
                 v->crush_phase = 0.0f;
                 v->crush_hold = 0;
                 v->osc.Strike();
                 v->amp_env.gate_on();
                 v->filt_env.gate_on();
+                v->ad_env.Trigger(braids::ENV_SEGMENT_ATTACK);
             } else {
                 /* Note On with velocity 0 = Note Off */
                 int vi = find_voice_for_note(inst, note);
@@ -1098,10 +1164,18 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 block_size = frames - rendered;
             }
 
+            /* Internal AD envelope: rendered exactly once per sub-block so
+             * its time base stays consistent (Render() advances its phase
+             * on every call — calling it at any other rate would make it
+             * run at the wrong speed). Its value is reused below both for
+             * pitch (ad_fm) and, held constant across this sub-block's
+             * samples, for amplitude (ad_vca) in the per-sample loop. */
+            float ad = v->ad_env.Render() / 65535.0f;
+
             /* Update oscillator parameters and pitch once per sub-block
              * (not once per host block) so knob turns and modulation land
              * at ~0.54ms granularity instead of ~2.9ms. */
-            apply_params_to_voice(inst, v);
+            apply_params_to_voice(inst, v, ad);
 
             int16_t pitch = note_to_pitch(v->note);
             if (fm_amount > 0.001f) {
@@ -1109,6 +1183,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             }
             if (vco_drift > 0.001f) {
                 pitch += v->vco_jitter.Render((int32_t)(vco_drift * VCO_DRIFT_SCALE));
+            }
+            if (inst->params[PARAM_AD_FM] > 0.001f) {
+                pitch += (int16_t)(ad * inst->params[PARAM_AD_FM] * 1536.0f); /* up to 12 semitones */
             }
             v->osc.set_pitch(pitch);
 
@@ -1131,6 +1208,17 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 /* Apply amplitude envelope to oscillator output */
                 int32_t sample = v->osc_buffer[s];
                 sample = (int32_t)(sample * amp);
+
+                /* AD>VCA: blend the primary amp envelope's amplitude
+                 * toward the AD envelope's own shape by ad_vca depth — 0
+                 * leaves amp untouched, 1 fully replaces it with ad's
+                 * shape for this sub-block (ad is held constant across
+                 * the sub-block, see its computation above). */
+                float ad_vca_depth = inst->params[PARAM_AD_VCA];
+                if (ad_vca_depth > 0.001f) {
+                    float vca_mix = amp + (ad - amp) * ad_vca_depth;
+                    sample = (int32_t)(v->osc_buffer[s] * vca_mix);
+                }
 
                 /* Downsample: sample-and-hold at target_hz. Phase
                  * naturally never falls behind by more than one sample

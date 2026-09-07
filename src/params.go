@@ -52,7 +52,8 @@ var paramPages = [][]string{
 	pageOscAmp:   {"engine", "timbre", "color", "attack", "decay", "sustain", "release", "volume"},
 	pageFilter:   {"fm", "cutoff", "resonance", "filt_env", "f_attack", "f_decay", "f_sustain", "f_release"},
 	pagePresets:  nil,
-	pageCrush:    {"resolution", "sample_rate", "vco_drift", "signature"},
+	pageCrush:    {"resolution", "sample_rate", "signature"},
+	pageAD:       {"meta_modulation", "ad_timbre", "ad_fm", "ad_color", "ad_vca", "ad_attack", "ad_decay", "vco_drift"},
 	pageSettings: nil,
 }
 
@@ -67,10 +68,11 @@ const (
 	pageFilter
 	pagePresets
 	pageCrush
+	pageAD
 	pageSettings
 )
 
-var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "CRUSH / QUANT", "SETTINGS"}
+var pageNames = []string{"OSC / AMP", "FILTER", "PRESETS", "CRUSH / QUANT", "AD / DRIFT", "SETTINGS"}
 
 // paramSlot is one parameter's live state: its metadata plus the Go-side
 // value driving the plugin. The plugin's get_param has no "current value"
