@@ -59,6 +59,8 @@ typedef plugin_api_v2_t* (*move_plugin_init_v2_fn)(const host_api_v1_t *host);
 #include "braids/macro_oscillator.h"
 #include "braids/envelope.h"
 #include "braids/svf.h"
+#include "braids/vco_jitter_source.h"
+#include "braids/signature_waveshaper.h"
 
 /* Constants */
 #define MAX_VOICES 4
@@ -77,6 +79,17 @@ typedef plugin_api_v2_t* (*move_plugin_init_v2_fn)(const host_api_v1_t *host);
  * Scale factor = 44100/96000 ≈ 0.459375
  */
 #define ENV_RATE_SCALE (44100.0f / 96000.0f)
+
+/* Fixed seed for the "signature" waveshaper — see signature_shaper's doc
+ * on braids_instance_t. Arbitrary; only needs to be a consistent constant. */
+#define SIGNATURE_SEED 0x5A17D157u
+
+/* vco_drift's intensity scale, passed to VcoJitterSource::Render(). Picked
+ * to land "subtle to obvious" pitch instability across the param's 0-1
+ * range at this codebase's pitch units (128 per semitone, see
+ * PITCH_CORRECTION/fm_amount above) — tune by ear on hardware if it reads
+ * too subtle or too extreme. */
+#define VCO_DRIFT_SCALE 32.0f
 
 /* =====================================================================
  * Simple ADSR envelope - replaces Braids' AR-only envelope
@@ -196,6 +209,8 @@ enum BraidsParam {
     PARAM_VOLUME,
     PARAM_RESOLUTION,
     PARAM_SAMPLE_RATE,
+    PARAM_VCO_DRIFT,
+    PARAM_SIGNATURE,
     PARAM_COUNT
 };
 
@@ -241,6 +256,8 @@ static const param_def_t g_shadow_params[] = {
     {"volume",    "Volume",    PARAM_TYPE_FLOAT, PARAM_VOLUME,    0.0f, 1.0f, NULL,         NULL,        "fader"},
     {"resolution",  "Resolution",  PARAM_TYPE_INT, PARAM_RESOLUTION,  0.0f, (float)(NUM_RESOLUTIONS - 1),  NULL, NULL, NULL},
     {"sample_rate", "Sample Rate", PARAM_TYPE_INT, PARAM_SAMPLE_RATE, 0.0f, (float)(NUM_SAMPLE_RATES - 1), NULL, NULL, NULL},
+    {"vco_drift", "VCO Drift", PARAM_TYPE_FLOAT, PARAM_VCO_DRIFT, 0.0f, 1.0f, NULL, NULL, NULL},
+    {"signature", "Signature", PARAM_TYPE_FLOAT, PARAM_SIGNATURE, 0.0f, 1.0f, NULL, NULL, NULL},
 };
 
 /* =====================================================================
@@ -252,6 +269,7 @@ struct BraidsVoice {
     SimpleADSR amp_env;
     SimpleADSR filt_env;
     braids::Svf svf;
+    braids::VcoJitterSource vco_jitter;
     int16_t osc_buffer[BRAIDS_BLOCK_SIZE];
     uint8_t sync_buffer[BRAIDS_BLOCK_SIZE];
     int note;
@@ -286,6 +304,14 @@ typedef struct {
 
     /* Render state: accumulate Braids 24-sample blocks into Move 128-sample blocks */
     int16_t render_buffer[MOVE_FRAMES_PER_BLOCK * 2]; /* stereo output */
+
+    /* signature param's waveshaper. On real hardware this is seeded from
+     * the MCU's unique serial number (a fixed per-device "character");
+     * here it's seeded once with a fixed constant at instance creation
+     * (SIGNATURE_SEED) and never rebuilt — Init() rebuilds a 257-entry
+     * table and is not real-time-safe to call from the render path, so
+     * the "signature" param controls wet/dry blend only, not the seed. */
+    braids::SignatureWaveshaper signature_shaper;
 } braids_instance_t;
 
 /* =====================================================================
@@ -468,6 +494,10 @@ static int load_braids_preset(braids_instance_t *inst, const char *path) {
     else p->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
     if (json_get_number(data, "sample_rate", &fval) == 0) p->params[PARAM_SAMPLE_RATE] = fval;
     else p->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
+    if (json_get_number(data, "vco_drift", &fval) == 0) p->params[PARAM_VCO_DRIFT] = fval;
+    else p->params[PARAM_VCO_DRIFT] = 0.0f;
+    if (json_get_number(data, "signature", &fval) == 0) p->params[PARAM_SIGNATURE] = fval;
+    else p->params[PARAM_SIGNATURE] = 0.0f;
 
     /* Parse octave transpose */
     if (json_get_number(data, "octave_transpose", &fval) == 0) {
@@ -587,6 +617,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     inst->params[PARAM_VOLUME] = 0.7f;
     inst->params[PARAM_RESOLUTION] = (float)(NUM_RESOLUTIONS - 1);
     inst->params[PARAM_SAMPLE_RATE] = (float)(NUM_SAMPLE_RATES - 1);
+    inst->params[PARAM_VCO_DRIFT] = 0.0f;
+    inst->params[PARAM_SIGNATURE] = 0.0f;
     inst->octave_transpose = 0;
     inst->voice_counter = 0;
     inst->preset_count = 0;
@@ -599,6 +631,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         inst->voices[i].amp_env.init();
         inst->voices[i].filt_env.init();
         inst->voices[i].svf.Init();
+        inst->voices[i].vco_jitter.Init();
         inst->voices[i].active = 0;
         inst->voices[i].gate = 0;
         inst->voices[i].note = 0;
@@ -609,6 +642,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         memset(inst->voices[i].osc_buffer, 0, sizeof(inst->voices[i].osc_buffer));
         memset(inst->voices[i].sync_buffer, 0, sizeof(inst->voices[i].sync_buffer));
     }
+
+    inst->signature_shaper.Init(SIGNATURE_SEED);
 
     /* Load presets from disk */
     load_presets(inst);
@@ -1024,6 +1059,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
     float gain = inst->params[PARAM_VOLUME] / (float)MAX_VOICES;
     float fm_amount = inst->params[PARAM_FM];
+    float vco_drift = inst->params[PARAM_VCO_DRIFT];
+    float signature_amt = inst->params[PARAM_SIGNATURE];
     float base_cutoff = inst->params[PARAM_CUTOFF];
     float filt_env_amount = inst->params[PARAM_FILT_ENV];
     int use_filter = (base_cutoff < 0.99f || inst->params[PARAM_RESONANCE] > 0.01f
@@ -1070,6 +1107,9 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             if (fm_amount > 0.001f) {
                 pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
             }
+            if (vco_drift > 0.001f) {
+                pitch += v->vco_jitter.Render((int32_t)(vco_drift * VCO_DRIFT_SCALE));
+            }
             v->osc.set_pitch(pitch);
 
             /* Render oscillator */
@@ -1108,6 +1148,15 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 /* Bit-crush: mask off the low bits of the 16-bit sample. */
                 if (use_crush) {
                     sample = (int16_t)sample & crush_mask;
+                }
+
+                /* Signature waveshaper: wet/dry blend by signature_amt —
+                 * the table itself is fixed (see signature_shaper's doc),
+                 * the knob only controls how much of its character mixes
+                 * in. */
+                if (signature_amt > 0.001f) {
+                    int32_t shaped = inst->signature_shaper.Transform((int16_t)sample);
+                    sample = sample + (int32_t)((shaped - sample) * signature_amt);
                 }
 
                 /* Apply SVF filter with envelope modulation */
