@@ -967,23 +967,24 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         BraidsVoice *v = &inst->voices[vi];
         if (!v->active) continue;
 
-        /* Update oscillator parameters */
-        apply_params_to_voice(inst, v);
-
-        /* Apply FM from mod wheel to pitch */
-        int16_t pitch = note_to_pitch(v->note);
-        if (fm_amount > 0.001f) {
-            pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
-        }
-        v->osc.set_pitch(pitch);
-
-        /* Render in 24-sample blocks */
+        /* Render in 24-sample sub-blocks */
         int rendered = 0;
         while (rendered < frames) {
             int block_size = BRAIDS_BLOCK_SIZE;
             if (rendered + block_size > frames) {
                 block_size = frames - rendered;
             }
+
+            /* Update oscillator parameters and pitch once per sub-block
+             * (not once per host block) so knob turns and modulation land
+             * at ~0.54ms granularity instead of ~2.9ms. */
+            apply_params_to_voice(inst, v);
+
+            int16_t pitch = note_to_pitch(v->note);
+            if (fm_amount > 0.001f) {
+                pitch += (int16_t)(fm_amount * 1536.0f); /* Up to 12 semitones */
+            }
+            v->osc.set_pitch(pitch);
 
             /* Render oscillator */
             memset(v->sync_buffer, 0, sizeof(v->sync_buffer));
