@@ -185,6 +185,97 @@ func (io *ioState) saveLocked() {
 	}
 }
 
+// ioOption is one selectable row, label plus whether it's the current
+// choice — the web UI's JSON shape for the SETTINGS page's 3 columns (see
+// webserver.go's handleIO). Mirrors what render()'s "> " marker shows
+// on-screen.
+type ioOption struct {
+	Label   string `json:"label"`
+	Current bool   `json:"current"`
+}
+
+// MIDIOptions/DeviceOptions/ChannelOptions list a column's selectable rows
+// for the web UI — the same rows render() draws, without the display-only
+// cursor highlight.
+func (io *ioState) MIDIOptions() []ioOption {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	curClient, curPort := io.rt.getMIDI()
+	rows := io.buildMIDIRowsLocked()
+	out := make([]ioOption, len(rows))
+	for i, r := range rows {
+		out[i] = ioOption{Label: r.label, Current: r.port.Addr.Client == curClient && r.port.Addr.Port == curPort}
+	}
+	return out
+}
+
+func (io *ioState) DeviceOptions() []ioOption {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	curDevice := io.rt.getPCM()
+	rows := io.buildDeviceRowsLocked()
+	out := make([]ioOption, len(rows))
+	for i, r := range rows {
+		out[i] = ioOption{Label: r.label, Current: r.device.HWDevice() == curDevice}
+	}
+	return out
+}
+
+func (io *ioState) ChannelOptions() []ioOption {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	curOffset := io.rt.getChannelOffset()
+	rows := io.buildChannelRowsLocked()
+	out := make([]ioOption, len(rows))
+	for i, r := range rows {
+		out[i] = ioOption{Label: r.label, Current: r.offset == curOffset}
+	}
+	return out
+}
+
+// SetMIDIByIndex/SetDeviceByIndex/SetChannelByIndex commit column choice i
+// directly (the web UI's equivalent of moving the on-screen cursor to i
+// and pressing the column's commit button) — writes to sharedConfig and
+// persists, same as commitMIDI/commitDevice/commitChannel.
+func (io *ioState) SetMIDIByIndex(i int) error {
+	io.mu.Lock()
+	rows := io.buildMIDIRowsLocked()
+	if i < 0 || i >= len(rows) {
+		io.mu.Unlock()
+		return fmt.Errorf("midi option index %d out of range (have %d)", i, len(rows))
+	}
+	io.midiCursor = i
+	io.mu.Unlock()
+	io.commitMIDI()
+	return nil
+}
+
+func (io *ioState) SetDeviceByIndex(i int) error {
+	io.mu.Lock()
+	rows := io.buildDeviceRowsLocked()
+	if i < 0 || i >= len(rows) {
+		io.mu.Unlock()
+		return fmt.Errorf("device option index %d out of range (have %d)", i, len(rows))
+	}
+	io.deviceCursor = i
+	io.mu.Unlock()
+	io.commitDevice()
+	return nil
+}
+
+func (io *ioState) SetChannelByIndex(i int) error {
+	io.mu.Lock()
+	rows := io.buildChannelRowsLocked()
+	if i < 0 || i >= len(rows) {
+		io.mu.Unlock()
+		return fmt.Errorf("channel option index %d out of range (have %d)", i, len(rows))
+	}
+	io.channelCursor = i
+	io.mu.Unlock()
+	io.commitChannel()
+	return nil
+}
+
 const settingsRowH = 13
 const settingsColW = 2 * cellW // each of the 3 columns spans 2 of the 8 encoder slots
 

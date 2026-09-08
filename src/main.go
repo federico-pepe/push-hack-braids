@@ -36,12 +36,17 @@ import (
 
 	"github.com/federico-pepe/ableton-push-hack/core/alsapcm"
 	"github.com/federico-pepe/ableton-push-hack/core/alsaseq"
+	"github.com/federico-pepe/ableton-push-hack/core/hackcfg"
 	"github.com/federico-pepe/ableton-push-hack/core/push3"
 )
 
 const (
 	cardID                = "PHVAudio"
 	defaultPushManagerURL = "http://localhost:7701"
+	// defaultWebPort matches hack.json's "port" field — kept in sync
+	// manually since hackcfg.Load only uses this as a fallback for a
+	// missing/unparsable field, not the normal path.
+	defaultWebPort = 7707
 
 	// How often the supervisor re-checks card presence / hw_params once
 	// a session is already running — catches Live restarting with
@@ -114,6 +119,7 @@ const (
 	ctlEncoder     ctlKind = iota // idx 0-7, delta = tick count
 	ctlPageJump                   // idx = page index (top-screen button 1-4 pressed)
 	ctlBottomPress                // idx = button index 0-7 (bottom-screen button pressed)
+	ctlSetParam                   // key/val = absolute param write (see webserver.go) — not from Push hardware
 )
 
 // controlEvent is a CC-derived UI action decoded on the ALSA read-loop
@@ -121,10 +127,16 @@ const (
 // drainCtl), the same split as note messages and for the same reason:
 // every bridge_plugin_* call must happen from the one goroutine that owns
 // the plugin instance (see midiHandler's doc comment above).
+//
+// key/val are only set for ctlSetParam, the web UI's absolute-value write
+// path (see webserver.go's handleSetParam) — every other kind is Push
+// hardware's relative-delta encoder feel and uses idx/delta instead.
 type controlEvent struct {
 	kind  ctlKind
 	idx   int
 	delta int
+	key   string
+	val   float64
 }
 
 func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
@@ -404,6 +416,19 @@ func runSupervised() {
 		log.Printf("signal received (%v), stopping...", sig)
 		close(shutdown)
 	}()
+
+	// web_ui's port, per hack.json — a catalog-installed hack only ever
+	// gets "-config <hack.json path>" as an argument (see this file's doc
+	// comment), so hackcfg.Load reads the same file *configPath already
+	// points at. A missing/unparsable port falls back to the value baked
+	// into hack.json (defaultWebPort) rather than failing startup — the
+	// web UI is optional, unlike the audio/MIDI path.
+	hcfg, err := hackcfg.Load(*configPath, defaultWebPort)
+	if err != nil {
+		log.Printf("loading %s for web UI port: %v (defaulting to %d)", *configPath, err, defaultWebPort)
+		hcfg.Port = defaultWebPort
+	}
+	go runWebServer(hcfg.Port, params, io, astatus, ctlCh, shutdown)
 
 	// One port, see midisession.go doc: pinned Push3 control surface +
 	// notes, picker-retargetable notes, and always open for external gear.

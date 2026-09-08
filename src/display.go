@@ -177,9 +177,29 @@ func renderKnobGrid(st *paramState, level *levelMeter) *image.NRGBA {
 
 		switch {
 		case c.key == "volume":
-			renderVolumeFader(img, cx, level)
+			renderVolumeFader(img, cx, level, c.slot)
 		case c.slot.meta.Type == "enum":
-			renderEngineInset(img, cx, c.slot)
+			// quantizer_scale's option names ("MAJOR PENTATONIC" etc.) run
+			// longer than engine's shape names or resolution/sample_rate's
+			// "16-bit"/"96kHz" — 2x truncates them too aggressively, so it
+			// alone reads at 1x.
+			scale := 2
+			if c.key == "quantizer_scale" {
+				scale = 1
+			}
+			renderEngineInset(img, cx, c.slot, scale)
+		case c.slot.meta.Type == "int":
+			// Plain int params (quantizer_root 0-11, trig_delay in ms) —
+			// NOT the *100 float path below, which was the "root shows
+			// 100/200/300…" / "trig_delay has two extra zeros" bug: it
+			// scaled an already-integer value as if it were a 0-1 float
+			// read as a percentage.
+			widgets.DrawKnobArc(img, mutableTheme, cx, knobCY, knobR, widgets.Knob{
+				Value: c.slot.value,
+				Min:   c.slot.meta.Min,
+				Max:   c.slot.meta.Max,
+				Color: knobColor(c.key),
+			})
 		default:
 			widgets.DrawKnobArc(img, mutableTheme, cx, knobCY, knobR, widgets.Knob{
 				Value:      c.slot.value * 100,
@@ -198,10 +218,9 @@ func renderKnobGrid(st *paramState, level *levelMeter) *image.NRGBA {
 // yellow text, centered in its cell — the original module's own small
 // algorithm-name OLED, reused via push3's "yellow" palette entry rather
 // than a raw color literal.
-func renderEngineInset(img *image.NRGBA, cx int, slot *paramSlot) {
+func renderEngineInset(img *image.NRGBA, cx int, slot *paramSlot, scale int) {
 	name := formatValue(slot)
 	const boxW, boxH = cellW - 8, 36
-	const scale = 2
 	x, y := cx-boxW/2, knobCY-boxH/2
 	gfx.FillRect(img, x, y, boxW, boxH, mutableBlack)
 	tw := text.WidthScaled(name, scale)
@@ -237,11 +256,13 @@ func dbFrac(peak float64) float64 {
 }
 
 // renderVolumeFader draws the Volume column as a fader whose fill tracks
-// the live output level (levelMeter) on a dB scale, not the Volume
-// parameter's own position — the parameter itself still turns via its
-// encoder as before (audiosession.go's drainCtl still calls applyEncoder
-// for it unchanged); this is purely what the fader visualizes.
-func renderVolumeFader(img *image.NRGBA, cx int, level *levelMeter) {
+// the live output level (levelMeter) on a dB scale, plus a thin marker line
+// showing where the Volume parameter itself is set (volSlot) — the fill can
+// legitimately sit below that line (a quiet passage, a note that hasn't hit
+// yet) or briefly above it (transient peaks), so the two aren't expected to
+// coincide; the marker is what the encoder controls, the fill is what's
+// actually coming out right now.
+func renderVolumeFader(img *image.NRGBA, cx int, level *levelMeter, volSlot *paramSlot) {
 	const w = 22
 	x := cx - w/2
 	y := knobCY - knobR
@@ -251,6 +272,14 @@ func renderVolumeFader(img *image.NRGBA, cx int, level *levelMeter) {
 		Min:   0,
 		Max:   100,
 	})
+	if volSlot != nil {
+		// Volume's own value is already a 0-1 linear amplitude (same units
+		// as levelMeter's peak), so dbFrac puts the marker on the exact
+		// same dB scale as the live fill above — a marker at 0.5 and a
+		// fill peaking at 0.5 land on the same line.
+		markY := y + h - int(float64(h)*dbFrac(volSlot.value))
+		gfx.FillRect(img, x-2, markY-1, w+4, 2, mutableGreen)
+	}
 }
 
 // renderPresetsPage draws PRESETS: the preset browser in column 1 only
@@ -299,7 +328,7 @@ func renderPresetsPage(st *paramState) *image.NRGBA {
 			gfx.FillRect(img, 0, y, cellW-4, rowH, mutableBlack)
 			col = mutableBeige
 		} else if idx == loaded {
-			col = mutableYellow
+			col = mutableGreen
 		}
 		text.Draw(img, 4, y+rowH-3, name, col)
 	}

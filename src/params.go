@@ -100,6 +100,12 @@ var enumSensitivity = map[string]int{
 	"preset":           4,
 	"octave_transpose": 4,
 	"quantizer_scale":  4, // 49 scales — as heavy as "engine"'s 47 shapes
+	// resolution/sample_rate: only 7 options each, so a lighter weight
+	// than engine/quantizer_scale's 4 — just enough to stop one graze of
+	// the encoder from jumping across several bit-depth/rate steps at
+	// once, without making a short list feel as heavy as a 47-entry one.
+	"resolution":  2,
+	"sample_rate": 2,
 }
 
 // sensitivityFor returns how much accumulated delta enum key needs before
@@ -476,6 +482,119 @@ func (st *paramState) MarkDirty() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.dirty = true
+}
+
+// SetParam writes key's value directly, clamped to the plugin's own
+// reported range — the web UI's absolute-write path (webserver.go),
+// unlike nudgeSlotLocked's relative encoder ticks. Resets accum so a
+// pending partial encoder turn doesn't compound with a web-set value.
+// Returns the formatted value ready for bridge_plugin_set_param, same
+// contract as applyEncoder/NudgeOctave. Setting "preset" this way also
+// updates presetCursor, so PRESETS' on-screen highlight stays in sync with
+// a preset picked from the browser.
+func (st *paramState) SetParam(key string, val float64) (formatted string, ok bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	slot := st.slots[key]
+	if slot == nil {
+		return "", false
+	}
+	if val < slot.meta.Min {
+		val = slot.meta.Min
+	}
+	if val > slot.meta.Max {
+		val = slot.meta.Max
+	}
+	slot.value = val
+	slot.accum = 0
+	if key == "preset" {
+		st.presetCursor = int(val + 0.5)
+	}
+	st.dirty = true
+	if slot.meta.Type == "float" {
+		return fmt.Sprintf("%.4f", slot.value), true
+	}
+	return fmt.Sprintf("%d", int(slot.value+0.5)), true
+}
+
+// webParamPage is one on-screen page's title and param keys — the web UI's
+// grouping (webserver.go's handleParams), reusing paramPages/pageNames so
+// both surfaces present the same synth-style layout (OSC/AMP, FILTER,
+// CRUSH/QUANT, AD/DRIFT) instead of the web UI inventing its own.
+type webParamPage struct {
+	Name string   `json:"name"`
+	Keys []string `json:"keys"`
+}
+
+// webParamPages lists every param-grid page plus a synthetic PRESET page
+// (preset + octave_transpose, which live outside paramPages — see
+// newParamState's doc). pageSettings is skipped: it's I/O picker state
+// (webserver.go's /api/io), not params.
+func webParamPages() []webParamPage {
+	var out []webParamPage
+	for i, keys := range paramPages {
+		if keys == nil {
+			continue
+		}
+		out = append(out, webParamPage{Name: pageNames[i], Keys: keys})
+	}
+	out = append(out, webParamPage{Name: pageNames[pagePresets], Keys: []string{"preset", "octave_transpose"}})
+	return out
+}
+
+// HasParam reports whether key names a known param — the web UI's request
+// validation before queuing a ctlSetParam event (webserver.go).
+func (st *paramState) HasParam(key string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	_, ok := st.slots[key]
+	return ok
+}
+
+// paramSnapshot is one param's live state, JSON-shaped for the web UI: its
+// metadata plus current value and the same short display string the
+// on-screen UI renders.
+type paramSnapshot struct {
+	Meta    paramMeta `json:"meta"`
+	Value   float64   `json:"value"`
+	Display string    `json:"display"`
+}
+
+// stateSnapshot is the web UI's GET /api/state and SSE payload shape.
+type stateSnapshot struct {
+	Page         int                       `json:"page"`
+	PageName     string                    `json:"pageName"`
+	PresetCursor int                       `json:"presetCursor"`
+	Params       map[string]paramSnapshot  `json:"params"`
+}
+
+// Snapshot returns every param's current value/meta plus the active page
+// and staged preset cursor.
+func (st *paramState) Snapshot() stateSnapshot {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	params := make(map[string]paramSnapshot, len(st.slots))
+	for key, slot := range st.slots {
+		params[key] = paramSnapshot{Meta: slot.meta, Value: slot.value, Display: formatValue(slot)}
+	}
+	pageName := ""
+	if st.page >= 0 && st.page < len(pageNames) {
+		pageName = pageNames[st.page]
+	}
+	return stateSnapshot{Page: st.page, PageName: pageName, PresetCursor: st.presetCursor, Params: params}
+}
+
+// Metas returns every param's metadata, sorted by key — the web UI's
+// one-shot GET /api/params (rarely changes, unlike Snapshot).
+func (st *paramState) Metas() []paramMeta {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make([]paramMeta, 0, len(st.slots))
+	for _, slot := range st.slots {
+		out = append(out, slot.meta)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }
 
 // formatValue renders a slot's current value as a short, human string: the

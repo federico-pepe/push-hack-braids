@@ -214,6 +214,20 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 							cSetParam(plugin, key, val)
 						}
 					}
+
+				case ctlSetParam:
+					// Absolute write from the web UI (see webserver.go) —
+					// same goroutine, same cSetParam call as every other
+					// case here, just not keyed off Push hardware. "preset"
+					// needs the same syncFromPluginState resync as the Load
+					// button's path above, since v2_apply_preset also
+					// overwrites every other param on the plugin side.
+					if val, ok := params.SetParam(ev.key, ev.val); ok {
+						cSetParam(plugin, ev.key, val)
+						if ev.key == "preset" {
+							params.syncFromPluginState(plugin)
+						}
+					}
 				}
 			default:
 				break drainCtl
