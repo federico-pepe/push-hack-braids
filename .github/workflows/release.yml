@@ -58,7 +58,7 @@ jobs:
       - name: Build DSP plugin (native x86_64, via Docker)
         run: |
           mkdir -p build dist/push-braids/module/presets
-          docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work debian:bullseye sh -c '
+          docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work debian:bookworm sh -c '
             apt-get update -qq && apt-get install -qq -y g++ >/dev/null
             BRAIDS_SRCS="third_party/braids/dsp/braids/macro_oscillator.cc third_party/braids/dsp/braids/analog_oscillator.cc \
               third_party/braids/dsp/braids/digital_oscillator.cc third_party/braids/dsp/braids/resources.cc \
