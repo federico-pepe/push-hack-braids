@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Push family context
+
+Shared facts for all Push repos (repo map, git identity, `core/` pinning, cross-repo hardware facts):
+
+@~/.claude/push-family.md
+
 ## What this is
 
 A [push-hack](https://github.com/federico-pepe/ableton-push-hack) module for Ableton Push 3. A standalone Go host that reads pad/button MIDI from Push 3's own ALSA sequencer, sends notes into a vendored Braids DSP plugin (macro oscillator by Emilie Gillet, via cgo/dlopen), and writes rendered audio into [push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)'s virtual sound card. It also draws an on-screen control UI on Push's own screen.
