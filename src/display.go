@@ -390,7 +390,7 @@ func toggleUI(pmURL string, st *paramState, io *ioState, astatus *audioStatus, l
 		uiMu.Lock()
 		lastPage = page
 		uiMu.Unlock()
-		if err := client.PushImage(renderParamPage(st, io, astatus, level)); err != nil {
+		if err := client.Push(renderParamPage(st, io, astatus, level)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
 		log.Printf("push-braids: UI ON (Shift+Device) — MIDI intercept enabled")
@@ -448,7 +448,7 @@ func runDisplayLoop(pmURL string, st *paramState, io *ioState, astatus *audioSta
 			syncUILEDs(pmURL, page)
 		}
 
-		if err := client.PushImage(renderParamPage(st, io, astatus, level)); err != nil {
+		if err := client.Push(renderParamPage(st, io, astatus, level)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
 	}
