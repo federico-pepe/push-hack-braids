@@ -2,7 +2,7 @@ module push-braids
 
 go 1.25.0
 
-require github.com/federico-pepe/ableton-push-hack/core v0.5.0
+require github.com/federico-pepe/ableton-push-hack/core v0.4.1
 
 require (
 	golang.org/x/image v0.41.0 // indirect

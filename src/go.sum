@@ -1,5 +1,5 @@
-github.com/federico-pepe/ableton-push-hack/core v0.5.0 h1:beUIwHw8xHsxOW700H0iMXUzR9eAik/5cIZzEzSyJK4=
-github.com/federico-pepe/ableton-push-hack/core v0.5.0/go.mod h1:jIGdPTG4YcT5Zt8gdsKsvjW+hP32nnquSWYR1ojQ03I=
+github.com/federico-pepe/ableton-push-hack/core v0.4.1 h1:d3Sva2Z/q//Fz8+gnrdp6Z5vuq7lemuIqHG0kFsC00g=
+github.com/federico-pepe/ableton-push-hack/core v0.4.1/go.mod h1:jIGdPTG4YcT5Zt8gdsKsvjW+hP32nnquSWYR1ojQ03I=
 golang.org/x/image v0.41.0 h1:8wS72eGJMJaBxK6okTzd4WaXumUlTVlb753MlsSvTCo=
 golang.org/x/image v0.41.0/go.mod h1:uIc348UZMSvS5Z65CVZ7iDPaNobNFEPeJ4kbqTOszmA=
 golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
