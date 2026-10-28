@@ -165,6 +165,12 @@
     margin: 0 0 10px;
     opacity: 0.7;
   }
+  #live h2 { font-size: 13px; margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+  #live button { font: inherit; padding: 6px 12px; cursor: pointer; border: 2px solid currentColor; background: transparent; color: inherit; }
+  #live button:disabled { opacity: 0.5; cursor: default; }
+  #live .msg { margin-top: 6px; font-size: 12px; white-space: pre-line; }
+  #live .msg.err { color: var(--off); }
+  #live .hint { font-size: 12px; opacity: 0.8; max-width: 52ch; }
   .io-row { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: center; padding: 6px 0; }
   .io-row label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
   select.io {
@@ -191,6 +197,22 @@
     <div class="io-row"><label>MIDI IN</label><select class="io" id="io-midi"></select></div>
     <div class="io-row"><label>Audio Out</label><select class="io" id="io-pcm"></select></div>
     <div class="io-row"><label>Channel</label><select class="io" id="io-channel"></select></div>
+  </section>
+  <section id="live">
+    <h2>Live</h2>
+    <div class="io-row"><label>Pads play</label>
+      <select class="io" id="pads-mode">
+        <option value="app">Braids only on its own track</option>
+        <option value="always">Braids on every track</option>
+      </select>
+    </div>
+    <div class="io-row"><label>Tracks</label>
+      <div>
+        <button type="button" id="make-tracks">Create the Braids tracks in Live</button>
+        <div id="tracks-msg" class="msg" role="status"></div>
+      </div>
+    </div>
+    <p class="hint">Creates an audio track that listens to Braids and a MIDI track that sends to Braids, and sets their inputs and outputs. Select the <b>Braids MIDI</b> track and press the pads to play. While the Braids app is open in Push Hack Home, the pads play Braids too. Enable the Push Hack Virtual Audio card in Push's audio preferences first.</p>
   </section>
 </main>
 <script>
@@ -392,6 +414,52 @@ function applyIO(io) {
   }
 }
 
+function applyPads(mode) {
+  const el = document.getElementById("pads-mode");
+  if (!el || document.activeElement === el) return; // do not fight the user's pick
+  if (mode && el.value !== mode) el.value = mode;
+}
+
+async function setPads(mode) {
+  try {
+    const r = await fetch("/api/pads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) {
+    console.error("setPads", e);
+  }
+}
+
+async function makeTracks() {
+  const btn = document.getElementById("make-tracks");
+  const msg = document.getElementById("tracks-msg");
+  btn.disabled = true;
+  msg.className = "msg";
+  msg.textContent = "Working…";
+  try {
+    const r = await (await fetch("/api/live/tracks", { method: "POST" })).json();
+    const lines = r.lines || [];
+    if (r.ok) {
+      msg.textContent = lines.join("\n");
+    } else {
+      msg.className = "msg err";
+      msg.textContent = lines.concat([r.error || "Something went wrong"]).join("\n");
+    }
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = "Could not reach Braids: " + e;
+  }
+  btn.disabled = false;
+}
+
+function wireLive() {
+  document.getElementById("pads-mode").addEventListener("change", (e) => setPads(e.target.value));
+  document.getElementById("make-tracks").addEventListener("click", makeTracks);
+}
+
 function applyAudioStatus(audio) {
   const el = document.getElementById("status");
   el.className = audio.ready ? "ready" : "notready";
@@ -408,10 +476,12 @@ function applyState(state) {
     applyParamValue(key, snap);
   }
   applyIO(state.io || {});
+  applyPads(state.pads);
   applyAudioStatus(state.audio || {});
 }
 
 async function init() {
+  wireLive();
   const data = await (await fetch("/api/params")).json();
   metas = Object.fromEntries((data.params || []).map((m) => [m.key, m]));
   pages = data.pages || [];

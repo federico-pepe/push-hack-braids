@@ -62,6 +62,7 @@ func (ws *webServer) buildState() map[string]any {
 			"channel": ws.io.ChannelOptions(),
 		},
 		"audio": map[string]any{"ready": ready, "message": msg},
+		"pads":  ws.io.PadsMode(),
 	}
 }
 
@@ -141,6 +142,42 @@ func (ws *webServer) handleIO(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePads sets which pad presses play Braids: {"mode": "app"|"always"}.
+func (ws *webServer) handlePads(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ws.io.SetPadsMode(body.Mode); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ws.params.MarkDirty()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleLiveTracks makes the Braids audio track and the Braids MIDI track in
+// Live, with their routing (see pushhack.go). It changes the user's Set, so it
+// only runs when the user presses the button.
+func (ws *webServer) handleLiveTracks(w http.ResponseWriter, r *http.Request) {
+	setChannel := func(offset int) error {
+		if offset%2 != 0 {
+			return fmt.Errorf("offset %d is not the start of a pair Braids can write to", offset)
+		}
+		return ws.io.SetChannelByIndex(offset / 2)
+	}
+	res, err := ensureBraidsTracks(ws.io.rt.getChannelOffset(), setChannel)
+	if err != nil {
+		log.Printf("live tracks: %v", err)
+		httpx.JSON(w, map[string]any{"ok": false, "error": err.Error(), "lines": res.Lines})
+		return
+	}
+	httpx.JSON(w, map[string]any{"ok": true, "lines": res.Lines})
+}
+
 // handleSetIO adapts one of ioState's SetXByIndex commit methods into a
 // POST {"index": n} handler — MIDI/device/channel share the same request
 // shape and error handling, only the underlying setter differs.
@@ -181,6 +218,8 @@ func runWebServer(port int, params *paramState, io *ioState, astatus *audioStatu
 	mux.HandleFunc("POST /api/io/midi", ws.handleSetIO(ws.io.SetMIDIByIndex))
 	mux.HandleFunc("POST /api/io/pcm", ws.handleSetIO(ws.io.SetDeviceByIndex))
 	mux.HandleFunc("POST /api/io/channel", ws.handleSetIO(ws.io.SetChannelByIndex))
+	mux.HandleFunc("POST /api/pads", ws.handlePads)
+	mux.HandleFunc("POST /api/live/tracks", ws.handleLiveTracks)
 	mux.HandleFunc("/", httpx.ServeEmbedded(webUI, "ui/index.html"))
 
 	handler := httpx.WithLogging(httpx.WithCORS("GET, POST, OPTIONS", mux))

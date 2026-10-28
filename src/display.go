@@ -8,7 +8,7 @@ package main
 //
 // Off by default: the UI only takes the screen (and enables push-manager's
 // MIDI intercept, so pad hits drive Braids instead of also reaching Live)
-// while toggled on via Shift+Device — see chord.go and toggleUI below.
+// while Braids owns the surface (an app of Push Hack Home) — see setUIFocus below.
 //
 // Page identity is shown by the top-screen buttons' own LEDs (leds.go),
 // not an on-screen header — there's no top-of-screen title on any page.
@@ -268,7 +268,7 @@ func renderVolumeFader(img *image.NRGBA, cx int, level *levelMeter, volSlot *par
 	y := knobCY - knobR
 	h := 2 * knobR
 	widgets.DrawFader(img, mutableTheme, x, y, w, h, widgets.Knob{
-		Value: dbFrac(level.get()) * 100,
+		Value: level.frac(time.Now()) * 100,
 		Min:   0,
 		Max:   100,
 	})
@@ -366,54 +366,52 @@ func renderWaitingScreen(msg string) *image.NRGBA {
 	return img
 }
 
-// toggleUI flips the on-screen param UI: entering takeover mode, enabling
-// push-manager's MIDI intercept (so pad hits stop reaching Live while this
-// UI reads them as controls, not notes), syncing LEDs for the current
-// page, and forcing an immediate frame — or releasing all three back to
-// the native Push UI / normal Live routing.
-func toggleUI(pmURL string, st *paramState, io *ioState, astatus *audioStatus, level *levelMeter) {
+// pmApp is this hack's id as an app of Push Hack Home (hack.json "surface").
+const pmApp = "push-braids"
+
+// newPMClient is a push-manager client that names this app, so push-manager
+// takes its frames while Braids owns the surface.
+func newPMClient(pmURL string) *pmclient.Client {
+	c := pmclient.New(pmURL)
+	c.App = pmApp
+	return c
+}
+
+// uiIsOn reports whether Braids owns the surface (Push Hack Home gave it).
+func uiIsOn() bool {
 	uiMu.Lock()
-	uiOn = !uiOn
-	on := uiOn
+	defer uiMu.Unlock()
+	return uiOn
+}
+
+// setUIFocus runs when Push Hack Home gives Braids the surface (on) or takes
+// it back (off). push-manager switches the display and the MIDI intercept; this
+// only starts and stops drawing, and lights or clears the LEDs of the current
+// page. It does not open itself with a button combination: Home does that.
+func setUIFocus(pmURL string, st *paramState, io *ioState, astatus *audioStatus, level *levelMeter, on bool) {
+	uiMu.Lock()
+	uiOn = on
 	uiMu.Unlock()
 
-	client := pmclient.New(pmURL)
 	if on {
-		if err := client.SetMode(2); err != nil {
-			log.Printf("display: enable takeover: %v", err)
-		}
-		if err := client.SetMidiFilter(true); err != nil {
-			log.Printf("display: enable midi filter: %v", err)
-		}
 		page := st.Page()
 		syncUILEDs(pmURL, page)
 		uiMu.Lock()
 		lastPage = page
 		uiMu.Unlock()
-		if err := client.Push(renderParamPage(st, io, astatus, level)); err != nil {
+		if err := newPMClient(pmURL).Push(renderParamPage(st, io, astatus, level)); err != nil {
 			log.Printf("display: push frame: %v", err)
 		}
-		log.Printf("push-braids: UI ON (Shift+Device) — MIDI intercept enabled")
-	} else {
-		if err := client.SetMode(0); err != nil {
-			log.Printf("display: disable takeover: %v", err)
-		}
-		if err := client.SetMidiFilter(false); err != nil {
-			log.Printf("display: disable midi filter: %v", err)
-		}
-		releaseUILEDs(pmURL)
-		log.Printf("push-braids: UI OFF (Shift+Device) — MIDI intercept disabled")
+		log.Printf("push-braids: focus — Braids has the surface")
+		return
 	}
+	releaseUILEDs(pmURL)
+	log.Printf("push-braids: blur — the surface is back with Home or Live")
 }
 
-// shutdownUI best-effort releases the display, MIDI intercept, and LEDs on
-// exit, regardless of the UI's last toggled state — leaving any of those
-// stuck on after this process exits would silently break Push with no
-// process left to blame.
+// shutdownUI best-effort clears the LEDs on exit. push-manager gives the
+// surface back to Live itself when an app that owns it stops.
 func shutdownUI(pmURL string) {
-	client := pmclient.New(pmURL)
-	_ = client.SetMode(0)
-	_ = client.SetMidiFilter(false)
 	releaseUILEDs(pmURL)
 }
 
@@ -426,7 +424,7 @@ func shutdownUI(pmURL string) {
 // trigger of its own. Also re-syncs LEDs whenever the page changes (a
 // top-button press elsewhere), since that has no other trigger either.
 func runDisplayLoop(pmURL string, st *paramState, io *ioState, astatus *audioStatus, level *levelMeter) {
-	client := pmclient.New(pmURL)
+	client := newPMClient(pmURL)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {

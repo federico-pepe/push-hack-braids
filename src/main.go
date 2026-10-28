@@ -23,7 +23,9 @@ package main
 import "C"
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -37,6 +39,7 @@ import (
 	"github.com/federico-pepe/ableton-push-hack/core/alsapcm"
 	"github.com/federico-pepe/ableton-push-hack/core/alsaseq"
 	"github.com/federico-pepe/ableton-push-hack/core/hackcfg"
+	"github.com/federico-pepe/ableton-push-hack/core/pmclient"
 	"github.com/federico-pepe/ableton-push-hack/core/push3"
 )
 
@@ -164,13 +167,13 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		if data[0]&0x0F != 0 {
 			return
 		}
-		cc := uint8(binary.LittleEndian.Uint32(data[4:]) & 0x7F)
-		val := uint8(binary.LittleEndian.Uint32(data[8:]) & 0x7F)
-
-		if cc == ccShift || cc == ccDevice {
-			onChordCC(cc, val, h.pmURL, h.params, h.io, h.astatus, h.level)
+		// Encoders and buttons are Braids' controls only while Braids owns the
+		// surface; otherwise they belong to Live (or Home).
+		if !uiIsOn() {
 			return
 		}
+		cc := uint8(binary.LittleEndian.Uint32(data[4:]) & 0x7F)
+		val := uint8(binary.LittleEndian.Uint32(data[8:]) & 0x7F)
 
 		// D-Pad/Select are unused now — top/bottom screen buttons replace
 		// them entirely (page nav + per-page actions), and their LEDs go
@@ -206,19 +209,11 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 	}
 
 	if fromPush3 {
-		// Only count Push3's own notes while the I/O picker still points
-		// at the port they arrived on — switching it elsewhere quiets
-		// Push3's own pads instead of double-triggering both sources.
+		// Which of Push3's own notes may play: see acceptPushNote.
 		curClient, curPort := h.rt.getMIDI()
-		if src.Client != curClient || src.Port != curPort {
-			return
-		}
-		// Push3's own touch-sensitive controls (encoder touch = notes 0-7,
-		// D-Pad center touch = note 13, etc. — docs/push3-button-map.md)
-		// send real Note On/Off outside the pad grid's 36-99 range —
-		// reject those, only the pad grid should trigger a voice. External
-		// gear isn't Push3 hardware, so it isn't range-limited this way.
-		if data[1] < 36 || data[1] > 99 {
+		configured := src.Client == curClient && src.Port == curPort
+		livePort := src.Port == alsaseq.Push3PortDefault
+		if !acceptPushNote(configured, livePort, uiIsOn(), data[1]) {
 			return
 		}
 	}
@@ -415,6 +410,22 @@ func runSupervised() {
 		sig := <-sigCh
 		log.Printf("signal received (%v), stopping...", sig)
 		close(shutdown)
+	}()
+
+	// Braids is an app of Push Hack Home (hack.json "surface"): Home gives it
+	// the screen, the encoders and the buttons (focus) and takes them back
+	// (blur). Play still reaches Live while Braids has the surface.
+	go runLiveMeter(level, shutdown)
+	surfaceCtx, cancelSurface := context.WithCancel(context.Background())
+	go func() { <-shutdown; cancelSurface() }()
+	go func() {
+		err := newPMClient(pmURL).RunSurface(surfaceCtx, []int{push3.CCPlay}, pmclient.SurfaceHandler{
+			OnFocus: func() { setUIFocus(pmURL, params, io, astatus, level, true) },
+			OnBlur:  func() { setUIFocus(pmURL, params, io, astatus, level, false) },
+		})
+		if errors.Is(err, pmclient.ErrNoSwitcher) {
+			log.Printf("push-manager has no Push Hack Home: update Push Hack to open Braids from Home (the on-screen controls are unavailable until then)")
+		}
 	}()
 
 	// web_ui's port, per hack.json — a catalog-installed hack only ever
