@@ -105,3 +105,20 @@ func TestLiveMeterIsShownAsLiveShowsIt(t *testing.T) {
 		t.Errorf("below 0 must clamp to 0, got %v", got)
 	}
 }
+
+func TestPadNotesCoverTheWholeGridOnce(t *testing.T) {
+	notes := padNotes()
+	if len(notes) != 64 {
+		t.Fatalf("got %d pads, want 64", len(notes))
+	}
+	seen := map[byte]bool{}
+	for _, n := range notes {
+		if n < 36 || n > 99 {
+			t.Errorf("note %d is outside the pad grid 36-99", n)
+		}
+		if seen[n] {
+			t.Errorf("note %d twice", n)
+		}
+		seen[n] = true
+	}
+}
