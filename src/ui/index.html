@@ -13,137 +13,147 @@
    * generic web skin bolted on.
    */
   :root {
-    --beige: #F2EFE9;   /* mutableBeige — panel background */
-    --track: #D9D3C4;   /* mutableTrack — empty knob track / strip bg */
-    --ink:   #000000;   /* mutableBlack — text/knob fill on beige */
-    --magenta: #B31748; /* mutableMagenta — "Color" params */
-    --green:   #1A7877; /* mutableGreen — "Timbre"/"FM" params, loaded preset */
-    --yellow:  #FADC3B; /* push3 "yellow" — engine/enum inset readout */
-    --panel-dark: #141414; /* widgets.Default.DarkGray — SETTINGS background */
-    --cobalt:     #1853B2; /* widgets.Default.Select — SETTINGS cursor/accent */
-    --lgray:      #CCCCCC; /* widgets.Default.CrumbCol */
-    --on:  #62FF55; /* widgets.Default.OnColor — audio ready */
-    --off: #FF4032; /* widgets.Default.OffColor — audio not ready */
+    --beige: #E9E7ED;   /* mutableBeige — the panel's pale lavender grey */
+    --track: #D2CFDA;   /* mutableTrack */
+    --ink:   #000000;
+    --magenta: #B31748; /* "Color" cap and pill */
+    --green:   #1A7877; /* "Timbre"/"FM" cap and pill */
+    --white:   #F4F4F2; /* default cap */
+    --bezel:   #1E1E20;
+    --ring:    #7A7A80;
+    --lcd:     #7E8B93; /* slate LCD */
+    --seg:     #E4F41C; /* yellow-green segments */
+    --panel-dark: #141414;
+    --cobalt:     #1853B2;
+    --lgray:      #CCCCCC;
+    --on:  #62FF55;
+    --off: #FF4032;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    background: var(--beige);
+    background: linear-gradient(160deg, #F1F0F4, var(--beige) 45%, #DDDBE4);
+    background-attachment: fixed;
     color: var(--ink);
-    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 14px/1.4 "DIN Alternate", "DIN Next", "Avenir Next", "Helvetica Neue", sans-serif;
   }
   header {
-    padding: 14px 16px;
+    padding: 18px 20px 14px;
     display: flex;
-    align-items: center;
-    gap: 10px;
-    background: var(--beige);
-    border-bottom: 2px solid var(--ink);
+    align-items: baseline;
+    gap: 14px;
+    border-bottom: 3px double var(--track);
   }
   header h1 {
-    font-size: 15px;
+    font-size: 40px;
     margin: 0;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-weight: 300;
+    letter-spacing: 0.02em;
   }
+  header .sub { font-size: 16px; letter-spacing: 0.12em; color: #444; flex: 1; }
   #status {
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     padding: 3px 8px;
-    border-radius: 3px;
+    border-radius: 10px;
     background: var(--track);
+    align-self: center;
   }
   #status.ready { background: var(--on); color: var(--ink); }
   #status.notready { background: var(--off); color: var(--beige); }
 
   main { max-width: 760px; margin: 0 auto; padding: 0 0 32px; }
 
-  /* Page tabs — same uppercase-label-row idea as renderTopTabs' physical
-     top-screen buttons: inactive = beige, active = ink bar with beige
-     text (the exact reversal SoftOn draws on-screen). */
-  #tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
-    padding: 8px 16px 0;
-  }
+  /* Page tabs: round buttons like the panel's setup buttons. */
+  #tabs { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 20px 0; }
   .tab {
     appearance: none;
-    border: none;
-    padding: 8px 12px;
+    border: 2px solid var(--bezel);
+    padding: 6px 14px;
     font: inherit;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    background: var(--track);
+    background: radial-gradient(circle at 35% 30%, #fff, var(--track));
     color: var(--ink);
     cursor: pointer;
-    border-radius: 3px 3px 0 0;
+    border-radius: 999px;
   }
-  .tab.active { background: var(--ink); color: var(--beige); }
+  .tab.active { background: radial-gradient(circle at 35% 30%, #555, var(--bezel)); color: var(--beige); }
+  .tab:focus-visible, .knob:focus-visible { outline: 3px solid var(--cobalt); outline-offset: 2px; }
 
-  .page { display: none; padding: 16px; }
-  .page.active { display: block; }
+  .page { display: none; padding: 20px; }
+  .page.active { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 22px 12px; }
+  .page > div { display: contents; }
 
-  .row {
-    display: grid;
-    grid-template-columns: 132px 1fr 60px;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--track);
-  }
-  .row:last-child { border-bottom: none; }
+  /* One cell per param: knob, label pill, value. */
+  .row { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .row.wide { grid-column: span 2; }
+  .row .val { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; min-height: 16px; }
   .row label {
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    padding: 1px 8px;
+    border-radius: 4px;
+    order: 2;
   }
-  .row .val {
-    text-align: right;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-  }
+  .row .val { order: 3; }
+  .row.accent-green label { background: var(--green); color: var(--white); }
+  .row.accent-magenta label { background: var(--magenta); color: var(--white); }
 
-  /* Continuous float/int params: plain slider, ink fill on beige track —
-     DrawKnobArc's own fill-on-track look, just linear instead of radial. */
-  input[type=range] {
-    width: 100%;
-    accent-color: var(--ink);
+  /* Knob: bezel, ring, cap, notch. */
+  .knob {
+    --cap: var(--white);
+    width: 84px; height: 84px; border-radius: 50%;
+    touch-action: none; cursor: ns-resize; position: relative;
+    background: radial-gradient(circle closest-side, var(--cap) 0 60%, transparent 61%),
+                radial-gradient(circle closest-side, var(--bezel) 0 82%, var(--ring) 83% 90%, var(--bezel) 91% 99%, transparent 100%);
+    box-shadow: 0 6px 10px rgba(0,0,0,.28);
   }
-  .row.accent-green input[type=range] { accent-color: var(--green); }
-  .row.accent-magenta input[type=range] { accent-color: var(--magenta); }
+  .row.accent-green .knob { --cap: var(--green); }
+  .row.accent-magenta .knob { --cap: var(--magenta); }
+  .knob .notch {
+    position: absolute; left: 50%; top: 0; width: 6px; height: 50%;
+    margin-left: -3px; transform-origin: 50% 100%;
+    background: linear-gradient(var(--white) 0 40%, var(--bezel) 41%);
+    border-radius: 3px;
+  }
+  .row.accent-green .notch, .row.accent-magenta .notch { background: linear-gradient(var(--white) 0 100%); }
 
-  /* Enum params: renderEngineInset's small dark-box/yellow-text readout,
-     reused as a <select>'s resting look. */
+  /* Enum params: the slate LCD with yellow-green segments. */
+  .lcd {
+    width: 100%; background: var(--lcd); border-radius: 8px; padding: 10px 12px;
+    box-shadow: inset 0 2px 5px rgba(0,0,0,.35);
+    order: 1;
+  }
   select.enum {
     width: 100%;
-    background: var(--ink);
-    color: var(--yellow);
+    background: transparent;
+    color: var(--seg);
+    text-shadow: 0 0 6px rgba(228,244,28,.6);
     border: none;
-    border-radius: 3px;
-    padding: 7px 8px;
+    font: inherit;
     font-weight: 700;
-    font-size: 12px;
+    font-size: 18px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
+  select.enum option { background: var(--bezel); color: var(--seg); }
+  .row .val.enum-val { display: none; }
 
   /* PRESET page: the loaded preset reads in the same green
      renderPresetsPage now uses on-screen; the row picker itself is the
      enum <select> above. */
   #preset-loaded {
+    grid-column: 1 / -1;
     font-size: 12px;
     font-weight: 700;
     color: var(--green);
-    padding: 4px 0 12px;
   }
 
   /* I/O / SETTINGS — deliberately the OTHER theme: Push's SETTINGS page
@@ -187,6 +197,7 @@
 <body>
 <header>
   <h1>Braids</h1>
+  <span class="sub">macro oscillator</span>
   <span id="status">connecting…</span>
 </header>
 <main>
@@ -242,6 +253,58 @@ function accentClass(key) {
   return "";
 }
 
+// buildKnob is a rotary control: drag up or down (or use the arrow keys) to
+// turn it; the notch sweeps 270 degrees, 7 o'clock to 5 o'clock, like the
+// module's knobs.
+function buildKnob(meta, row) {
+  const el = document.createElement("div");
+  el.className = "knob";
+  el.tabIndex = 0;
+  el.setAttribute("role", "slider");
+  el.setAttribute("aria-label", meta.name || meta.key);
+  el.setAttribute("aria-valuemin", meta.min);
+  el.setAttribute("aria-valuemax", meta.max);
+  const notch = document.createElement("div");
+  notch.className = "notch";
+  el.appendChild(notch);
+
+  const span = meta.max - meta.min;
+  let value = meta.min;
+  const clamp = (v) => Math.min(meta.max, Math.max(meta.min, v));
+  const quant = (v) => (meta.type === "int" ? Math.round(v) : v);
+  el.setValue = (v) => {
+    value = clamp(v);
+    notch.style.transform = `rotate(${-135 + 270 * ((value - meta.min) / (span || 1))}deg)`;
+    el.setAttribute("aria-valuenow", value);
+  };
+  const commit = (v) => {
+    el.setValue(quant(v));
+    setParam(meta.key, value);
+    row.querySelector(".val").textContent = meta.type === "int" ? String(value) : value.toFixed(3);
+  };
+
+  let drag = null;
+  el.addEventListener("pointerdown", (e) => {
+    el.setPointerCapture(e.pointerId);
+    drag = { y: e.clientY, v: value };
+    touching.add(meta.key);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (drag) commit(drag.v + ((drag.y - e.clientY) / 200) * span);
+  });
+  const end = () => { drag = null; touching.delete(meta.key); };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.addEventListener("keydown", (e) => {
+    const step = meta.type === "int" ? 1 : span / 100;
+    if (e.key === "ArrowUp" || e.key === "ArrowRight") commit(value + step);
+    else if (e.key === "ArrowDown" || e.key === "ArrowLeft") commit(value - step);
+    else return;
+    e.preventDefault();
+  });
+  return el;
+}
+
 function buildParamRow(meta) {
   const row = document.createElement("div");
   row.className = "row " + accentClass(meta.key);
@@ -264,24 +327,22 @@ function buildParamRow(meta) {
     control.addEventListener("focus", () => touching.add(meta.key));
     control.addEventListener("blur", () => touching.delete(meta.key));
     control.addEventListener("change", () => setParam(meta.key, Number(control.value)));
+    row.classList.add("wide");
   } else {
-    control = document.createElement("input");
-    control.type = "range";
-    control.min = meta.min;
-    control.max = meta.max;
-    control.step = meta.type === "int" ? 1 : (meta.max - meta.min) / 200 || 0.001;
-    control.addEventListener("pointerdown", () => touching.add(meta.key));
-    control.addEventListener("pointerup", () => touching.delete(meta.key));
-    control.addEventListener("input", () => {
-      setParam(meta.key, Number(control.value));
-      row.querySelector(".val").textContent = control.value;
-    });
+    control = buildKnob(meta, row);
   }
   control.className += " control";
-  row.appendChild(control);
+  if (meta.type === "enum") {
+    const lcd = document.createElement("div");
+    lcd.className = "lcd";
+    lcd.appendChild(control);
+    row.appendChild(lcd);
+  } else {
+    row.appendChild(control);
+  }
 
   const val = document.createElement("span");
-  val.className = "val";
+  val.className = "val" + (meta.type === "enum" ? " enum-val" : "");
   row.appendChild(val);
 
   // "preset" gets its loaded-name readout below the picker, same "this is
@@ -333,7 +394,7 @@ function applyParamValue(key, snap) {
   if (control.tagName === "SELECT") {
     control.value = Math.round(snap.value);
   } else {
-    control.value = snap.value;
+    control.setValue(snap.value);
   }
   row.querySelector(".val").textContent = snap.display;
 

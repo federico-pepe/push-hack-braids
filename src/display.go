@@ -50,14 +50,14 @@ const (
 // those to change, and SETTINGS' list rows already lean on Default.Select
 // for its cursor highlight.
 var (
-	mutableBeige   = color.NRGBA{R: 0xF2, G: 0xEF, B: 0xE9, A: 255}
+	mutableBeige   = color.NRGBA{R: 0xE9, G: 0xE7, B: 0xED, A: 255} // the panel's pale lavender grey
 	mutableBlack   = color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 255}
 	mutableMagenta = color.NRGBA{R: 0xB3, G: 0x17, B: 0x48, A: 255}
 	mutableGreen   = color.NRGBA{R: 0x1A, G: 0x78, B: 0x77, A: 255}
 	// mutableTrack: a muted darker beige for a knob's empty track / the
 	// bottom strip's background — plain beige-on-beige would make both
 	// invisible against the panel fill.
-	mutableTrack  = color.NRGBA{R: 0xD9, G: 0xD3, B: 0xC4, A: 255}
+	mutableTrack  = color.NRGBA{R: 0xD2, G: 0xCF, B: 0xDA, A: 255}
 	mutableYellow = func() color.NRGBA {
 		idx, ok := push3.ColorByName("yellow")
 		if !ok {
@@ -180,57 +180,28 @@ func renderKnobGrid(st *paramState, level *levelMeter) *image.NRGBA {
 			renderVolumeFader(img, cx, level, c.slot)
 		case c.slot.meta.Type == "enum":
 			// quantizer_scale's option names ("MAJOR PENTATONIC" etc.) run
-			// longer than engine's shape names or resolution/sample_rate's
-			// "16-bit"/"96kHz" — 2x truncates them too aggressively, so it
-			// alone reads at 1x.
+			// longer than the other enums' names, so it alone reads at 1x.
 			scale := 2
 			if c.key == "quantizer_scale" {
 				scale = 1
 			}
 			renderEngineInset(img, cx, c.slot, scale)
-		case c.slot.meta.Type == "int":
-			// Plain int params (quantizer_root 0-11, trig_delay in ms) —
-			// NOT the *100 float path below, which was the "root shows
-			// 100/200/300…" / "trig_delay has two extra zeros" bug: it
-			// scaled an already-integer value as if it were a 0-1 float
-			// read as a percentage.
-			widgets.DrawKnobArc(img, mutableTheme, cx, knobCY, knobR, widgets.Knob{
-				Value: c.slot.value,
-				Min:   c.slot.meta.Min,
-				Max:   c.slot.meta.Max,
-				Color: knobColor(c.key),
-			})
 		default:
-			widgets.DrawKnobArc(img, mutableTheme, cx, knobCY, knobR, widgets.Knob{
-				Value:      c.slot.value * 100,
-				Min:        c.slot.meta.Min * 100,
-				Max:        c.slot.meta.Max * 100,
-				Color:      knobColor(c.key),
-				ValueScale: 2,
-			})
+			// float and int params alike: the pointer sits at the value's
+			// place in [Min,Max]; the readout is formatValue's.
+			drawPanelKnob(img, cx, knobCY, knobR, slotFrac(c.slot), capColor(c.key))
+			drawValueReadout(img, cx, c.slot)
 		}
 	}
-	widgets.DrawBotStrip(img, mutableTheme, screenH-botStripH, screenW, cellW, botStripH, bottom, "")
+	drawPillStrip(img, bottom)
 	return img
 }
 
-// renderEngineInset draws the "engine" enum as a small dark box with
-// yellow text, centered in its cell — the original module's own small
-// algorithm-name OLED, reused via push3's "yellow" palette entry rather
-// than a raw color literal.
+// renderEngineInset draws an enum on the slate LCD, like the module's own
+// algorithm readout.
 func renderEngineInset(img *image.NRGBA, cx int, slot *paramSlot, scale int) {
-	name := formatValue(slot)
 	const boxW, boxH = cellW - 8, 36
-	x, y := cx-boxW/2, knobCY-boxH/2
-	gfx.FillRect(img, x, y, boxW, boxH, mutableBlack)
-	tw := text.WidthScaled(name, scale)
-	if tw > boxW-4 {
-		// text.Truncate measures at 1x, so truncate against the 1x budget
-		// (boxW-4)/scale before scaling up, rather than the scaled width.
-		name = text.Truncate(name, (boxW-4)/scale)
-		tw = text.WidthScaled(name, scale)
-	}
-	text.DrawScaled(img, x+(boxW-tw)/2, y+boxH-11, scale, name, mutableYellow)
+	drawLCD(img, cx-boxW/2, knobCY-boxH/2, boxW, boxH, formatValue(slot), scale)
 }
 
 // meterMinDB is the fader's bottom of scale — standard dB-meter practice,
@@ -334,19 +305,14 @@ func renderPresetsPage(st *paramState) *image.NRGBA {
 	}
 
 	if octSlot != nil {
-		widgets.DrawKnobArc(img, mutableTheme, cellW+knobCX, knobCY, knobR, widgets.Knob{
-			Bipolar:    true,
-			Value:      octSlot.value,
-			Min:        octSlot.meta.Min,
-			Max:        octSlot.meta.Max,
-			ValueScale: 2,
-		})
+		drawPanelKnob(img, cellW+knobCX, knobCY, knobR, slotFrac(octSlot), panelWhite)
+		drawValueReadout(img, cellW+knobCX, octSlot)
 	}
 
 	var bottom [8]widgets.SoftButton
 	bottom[0] = widgets.SoftButton{Label: "LOAD", State: widgets.SoftConfirm}
 	bottom[1] = widgets.SoftButton{Label: "OCTAVE"}
-	widgets.DrawBotStrip(img, mutableTheme, screenH-botStripH, screenW, cellW, botStripH, bottom, "")
+	drawPillStrip(img, bottom)
 	return img
 }
 
