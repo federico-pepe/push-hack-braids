@@ -87,10 +87,12 @@
 
   .page { display: none; padding: 20px; }
   .page.active { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 22px 12px; }
-  .page > div { display: contents; }
+  .page > div:not(.row) { display: contents; } /* the preset wrapper */
 
   /* One cell per param: knob, label pill, value. */
-  .row { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  /* The control sits in a fixed 84px band, centred, so every label lands on
+     the same line whether its control is a knob or the shorter LCD. */
+  .row { display: grid; grid-template-rows: 84px auto auto; justify-items: center; align-items: center; row-gap: 8px; }
   .row.wide { grid-column: span 2; }
   .row .val { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; min-height: 16px; }
   .row label {
