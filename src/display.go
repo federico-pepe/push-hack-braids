@@ -396,6 +396,7 @@ func setUIFocus(pmURL string, st *paramState, io *ioState, astatus *audioStatus,
 	if on {
 		page := st.Page()
 		syncUILEDs(pmURL, page)
+		go clearPadLEDs(pmURL) // Home's row of lit pads must not stay under the param screen
 		uiMu.Lock()
 		lastPage = page
 		uiMu.Unlock()

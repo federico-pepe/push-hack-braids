@@ -2,7 +2,7 @@
   "id": "push-braids",
   "name": "Braids",
   "description": "Macro oscillator module based on Mutable Instruments Braids by Emilie Gillet, ported from Schwung DSP. An app of Push Hack Home (Shift + Help): open it for on-screen controls and to play it with the pads. The web page sets which pad presses play it and creates its two tracks in Live (an audio track and a MIDI track routed to Braids MIDI In). Renders audio into push-audio-loopback's virtual card. Needs push-audio-loopback, push-manager + push-display, and the PushHack Remote Script (for the tracks and the level meter).",
-  "version": "0.3.0-alpha",
+  "version": "0.3.1-alpha",
   "author": "federico-pepe",
   "binary": "push-braids",
   "enabled": true,

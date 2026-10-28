@@ -113,6 +113,45 @@ func syncUILEDs(pmURL string, page int) {
 	}
 }
 
+// padNotes is the note of every pad on the 8x8 grid (36-99).
+func padNotes() []byte {
+	notes := make([]byte, 0, 64)
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			notes = append(notes, push3.PadNote(col, row))
+		}
+	}
+	return notes
+}
+
+// setPadLED posts one pad's LED value (0 is off). Best-effort, like setLEDCC.
+func setPadLED(pmURL string, note byte, value byte) {
+	body := fmt.Sprintf(`{"type":"note","channel":0,"note":%d,"velocity":%d}`, note, value)
+	req, err := http.NewRequest(http.MethodPost, pmURL+"/api/midi/led", bytes.NewBufferString(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ledHTTP.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+// clearPadLEDs turns every pad dark. Home lights a row of pads for its entries
+// (one colour per app); they would stay lit under Braids' screen, where the pads
+// are for playing, not for choosing. Home may paint once more as the app opens,
+// so it goes dark again a moment later, like the arrangement hack's blackout.
+func clearPadLEDs(pmURL string) {
+	for _, delay := range []time.Duration{0, 300 * time.Millisecond, 900 * time.Millisecond} {
+		time.Sleep(delay)
+		for _, n := range padNotes() {
+			setPadLED(pmURL, n, ledOff)
+		}
+	}
+}
+
 // releaseUILEDs turns every CC this file might have lit back off — called
 // when the UI toggles off and on process shutdown, so a crash or normal
 // exit never leaves Push's control surface stuck mid-override.
