@@ -44,6 +44,10 @@ ssh root@push.local "/etc/init.d/push-hack-push-braids start"
 ```
 
 Key facts:
+- Braids is an app of Push Hack Home (`hack.json` `surface`, `pmclient.RunSurface` in `main.go`): Home opens it, `setUIFocus` (`display.go`) starts and stops drawing. There is no button combination of its own (no `chord.go`). Encoder and button CCs count only while it has the surface.
+- Pads: `acceptPushNote` (`pads.go`). With the MIDI input on Live Port, pads play on every track ("always"); otherwise ("app", the default, External Port) they play only while the app is open, and the Braids MIDI track in Live feeds the port `Braids MIDI In`. The web page sets it (`POST /api/pads`).
+- `pushhack.go`: the link to the PushHack Remote Script. `runLiveMeter` follows the "Braids" audio track's meter (the `tracks` and `meters` topics) into `levelMeter`; the fader shows Live's value as it is, and falls back to Braids' own peak when the link is down. `ensureBraidsTracks` (`POST /api/live/tracks`) makes the two tracks with `track.ensure`, and switches Braids' channel pair to the one Live offers when there is only one.
+- A test must not need Live: the helpers in `pushhack.go` and `pads.go` are pure Go.
 - SSH as `ableton@push.local` for normal files, `root@push.local` for service control (no `sudo` on the device).
 - Install path on the device: `/data/push-hack/hacks/push-braids/`.
 - Service name: `push-hack-push-braids` (sysvinit, `/etc/init.d/push-hack-push-braids {start|stop|restart|status}`). Stop it before copying the binary — a running binary is locked on Linux.

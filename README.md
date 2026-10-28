@@ -1,8 +1,8 @@
 # push-hack-braids
 
 A [push-hack](https://github.com/federico-pepe/ableton-push-hack) module for
-Ableton Push 3. A standalone DSP host: reads pad/button MIDI straight off
-Push3's own ALSA sequencer, feeds notes into a Move Anything `plugin_api_v2`
+Ableton Push 3. A standalone DSP host: takes notes from a MIDI track in Live
+(or from Push3's pads while its app is open), feeds them into a Move Anything `plugin_api_v2`
 DSP module — Braids, the macro oscillator by Emilie Gillet (Mutable
 Instruments), ported from Schwung DSP — and writes the rendered audio into
 [push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)'s
@@ -18,7 +18,8 @@ self-contained — the Braids DSP plugin and its presets ship in the
 release, no manual copy step. Requires `push-hack-audio-loopback`
 (installed automatically first if missing) and `push-manager` +
 `push-display` (part of the base push-hack setup) for its on-screen
-controls.
+controls, and the PushHack Remote Script (part of push-hack) for the tracks
+and the level meter.
 
 ## Build
 
@@ -39,20 +40,41 @@ via its Move Everything port by Charles Vestal — both MIT-licensed, see
 workflow) builds it into `dsp.so` and bundles it with its presets in the
 release tarball, so a catalog install needs no manual step.
 
-To actually hear it: an audio track in Live's own Set, Input = "Push Hack
-Virtual Audio", Monitor = In, routed to Master. Pressing a pad on Push3
-should now trigger Braids and come out the real speaker/headphone output.
+## Set up in Live
+
+1. In Push's audio preferences, enable the **Push Hack Virtual Audio** card (one
+   stereo input pair, for example 3/4).
+2. Open Braids' web page (Push Hack Catalog, or `http://push.local:7712`) and press
+   **Create the Braids tracks in Live**. It makes two tracks and sets their routing:
+   - **Braids**: an audio track, input `Ext. In` on the card's pair, monitor In,
+     output Main. Its meter drives the Volume fader on Push's screen.
+   - **Braids MIDI**: a MIDI track, input All Ins, output **Braids MIDI In**.
+   If Live offers exactly one stereo pair, Braids switches its own channel pair to
+   it. If Live offers several, the page lists them and asks you to set the pair in
+   Braids' I/O settings to match.
+3. Select the **Braids MIDI** track and press the pads. Braids plays only while that
+   track is selected, so pads on your other tracks do not trigger it.
+
+The page also has **Pads play**: "Braids only on its own track" (the default) or
+"Braids on every track" (the old behaviour: the MIDI input is Live Port, so every
+pad press plays Braids).
+
+Braids needs the PushHack Remote Script, which ships with Push Hack, selected in
+Live (Preferences, a control-surface slot, Input and Output None). The audio
+track has to exist for the Volume fader to show Live's level; without it the
+fader shows Braids' own peak.
 
 ## On-screen controls
 
-Hold **Shift + Device** to toggle a param UI on Push's own screen: a
-gauge knob per parameter on the current page (Algorithm, Timbre, Color,
+Braids is an app of **Push Hack Home**: press **Shift + Help**, pick **BRAIDS**.
+Its param UI then owns Push's screen, encoders and buttons: a gauge knob per
+parameter on the current page (Algorithm, Timbre, Color,
 Attack/Decay/Sustain/Release, Volume on page 1; the filter envelope on
 page 2), driven by the 8 encoders above the screen. **D-Pad Left/Right**
-switches pages. Turning the UI on also enables push-manager's MIDI
-intercept, so pad hits drive Braids only — they stop reaching Live for
-as long as the UI is on. Toggling it off (same chord) hands the screen
-and MIDI back to normal.
+switches pages. While the app is open the pads play Braids directly (and stop
+reaching Live). **Help** goes back to Live; hold it half a second for Home. The
+Volume fader shows the level of the **Braids** audio track in Live, as Live's own
+meter shows it.
 
 ### I/O picker (page 3)
 
@@ -69,10 +91,11 @@ scrollable list to pick:
 **D-Pad Up/Down** moves the list cursor, **Select** confirms the
 highlighted row. A change applies immediately (MIDI resubscribes, the
 audio device reopens if needed) and is saved to `braids-config.json`, so
-it survives a restart. Picking the wrong MIDI port breaks Shift+Device
-itself (no pad/button events reach this hack at all) — if that happens,
-edit `/data/push-hack/hacks/push-braids/braids-config.json` directly
-over SSH and restart the service.
+it survives a restart. The on-screen controls always come from Push's own
+port, so picking another MIDI input never breaks them; it only changes which
+pad presses play Braids (see "Set up in Live"). If something goes wrong, edit
+`/data/push-hack/hacks/push-braids/braids-config.json` over SSH and restart the
+service.
 
 ## Persistent install
 

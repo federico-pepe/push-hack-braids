@@ -12,7 +12,6 @@ import (
 	"math"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -27,15 +26,6 @@ func cSetParam(plugin *C.bridge_plugin_t, key, val string) {
 	C.free(unsafe.Pointer(k))
 	C.free(unsafe.Pointer(v))
 }
-
-// levelMeter is a lock-free live peak level (0-1), written every render
-// block by audioSession.run, read at ~30fps by the display loop for the
-// Volume fader — a plain atomic instead of a mutex since it's write-heavy
-// on the real-time render thread and read-only everywhere else.
-type levelMeter struct{ bits atomic.Uint64 }
-
-func (m *levelMeter) set(v float64) { m.bits.Store(math.Float64bits(v)) }
-func (m *levelMeter) get() float64  { return math.Float64frombits(m.bits.Load()) }
 
 // audioSession owns one open PCM handle and the goroutine rendering into
 // it. The DSP plugin instance and MIDI subscription live independently in

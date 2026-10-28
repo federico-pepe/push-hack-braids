@@ -111,8 +111,6 @@ func syncUILEDs(pmURL string, page int) {
 	for _, n := range pageBottomLit[page] {
 		setLEDCC(pmURL, push3.CCScreenBotN(n-1), ledWhite)
 	}
-	setLEDCC(pmURL, push3.CCShift, ledWhite)
-	setLEDCC(pmURL, push3.CCDeviceView, ledWhite)
 }
 
 // releaseUILEDs turns every CC this file might have lit back off — called

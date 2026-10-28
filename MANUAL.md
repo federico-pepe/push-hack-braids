@@ -4,7 +4,7 @@ This manual describes the on-screen controls of push-braids, a Braids macro-osci
 
 ## How to Open the On-Screen Controls
 
-Hold Shift and press Device together. This turns the on-screen controls on or off.
+Braids is an app of Push Hack Home. Press Shift and Help together to open Home, then pick **BRAIDS**. Press Help to go back to Live.
 
 The screen shows 6 buttons above it, one per page. Press a top button to jump to that page. The 8 encoders below the screen turn the knobs on the current page.
 
