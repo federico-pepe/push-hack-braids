@@ -82,7 +82,7 @@ The pattern used throughout: a loop that watches for a target to change (a confi
 
 ### Audio bus (`bus.go`)
 
-When the push-audio-loopback mixer answers on the bus socket (`core/audiobus`), `watchHWParams` plays through it: `startBusSession` renders the same way but sends float blocks to the mixer instead of writing the card, so other audio hacks can play at the same time. Without a mixer the direct path is unchanged. In bus mode the mixer owns the device and the channel pair (`getChannelOffset` returns the pair the mixer gave; `bus_pair` in `braids-config.json`, -1 = the mixer chooses). Design: `docs/audio-bus.md` in ableton-push-hack. The Makefile builds against a local `core/` until `audiobus` is tagged.
+When the push-audio-loopback mixer answers on the bus socket (`core/audiobus`), `watchHWParams` plays through it: `startBusSession` renders the same way but sends float blocks to the mixer instead of writing the card, so other audio hacks can play at the same time. Without a mixer the direct path is unchanged. In bus mode the mixer owns the device and the channel pair (`getChannelOffset` returns the pair the mixer gave; `bus_pair` in `braids-config.json`, -1 = the mixer chooses). Design: `docs/audio-bus.md` in ableton-push-hack. `audiobus` comes from `core/v0.5.3`.
 
 ### One goroutine owns the plugin instance
 
