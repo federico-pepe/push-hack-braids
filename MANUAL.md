@@ -74,7 +74,7 @@ This page holds a second envelope, called the AD envelope, and a pitch drift eff
 
 ## SETTINGS Page
 
-This page selects the MIDI input, the audio output device, and the audio channel pair. Turn the encoders to browse each list, then press the matching bottom button to select an option.
+This page selects the MIDI input, the audio output device, and the audio channel pair. While the audio mixer of push-audio-loopback runs, the audio output device has no effect: the mixer owns the card, and only the channel pair is chosen. Turn the encoders to browse each list, then press the matching bottom button to select an option.
 
 ## Presets and These Controls
 
