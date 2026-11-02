@@ -210,6 +210,7 @@
     <div class="io-row"><label>MIDI IN</label><select class="io" id="io-midi"></select></div>
     <div class="io-row"><label>Audio Out</label><select class="io" id="io-pcm"></select></div>
     <div class="io-row"><label>Channel</label><select class="io" id="io-channel"></select></div>
+    <p class="hint" id="busnote"></p>
   </section>
   <section id="live">
     <h2>Live</h2>
@@ -527,6 +528,11 @@ function applyAudioStatus(audio) {
   const el = document.getElementById("status");
   el.className = audio.ready ? "ready" : "notready";
   el.textContent = audio.ready ? "Running" : (audio.message || "Not ready").split("\n")[0];
+  // Bus mode: the audio mixer owns the card, so the device list has no effect.
+  document.getElementById("io-pcm").disabled = !!audio.bus;
+  document.getElementById("busnote").textContent = audio.bus
+    ? "Audio mode: mixer. Braids plays through the audio mixer of push-audio-loopback, so other audio hacks (for example MachineModule) can play at the same time. The mixer owns the card, so the Audio Out list is off. Pick a Channel. Live still needs an audio track that listens to this channel pair: press Create tracks in the Live section, or set the track up yourself."
+    : "Audio mode: direct. No audio mixer was found, so Braids writes to the card itself. Only one audio hack can do this at a time. A newer push-audio-loopback with the audio mixer lets several hacks play together.";
 }
 
 let pagesBuilt = false;

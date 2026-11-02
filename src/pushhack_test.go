@@ -23,21 +23,6 @@ func TestPairNames(t *testing.T) {
 	}
 }
 
-func TestOnlyStereoPair(t *testing.T) {
-	if p, ok := onlyStereoPair([]string{"3/4", "3", "4"}); !ok || p != "3/4" {
-		t.Errorf("one pair: %q %v", p, ok)
-	}
-	if _, ok := onlyStereoPair([]string{"1/2", "3/4", "3"}); ok {
-		t.Error("two pairs are ambiguous")
-	}
-	if _, ok := onlyStereoPair([]string{"1", "2"}); ok {
-		t.Error("mono only has no pair")
-	}
-	if _, ok := onlyStereoPair(nil); ok {
-		t.Error("nothing offered")
-	}
-}
-
 func TestBraidsTrackIndexAndMeterOf(t *testing.T) {
 	tracks := []liveTrack{{"1-MIDI", "midi"}, {"Braids", "midi"}, {"Braids", "audio"}}
 	if got := braidsTrackIndex(tracks); got != 2 {

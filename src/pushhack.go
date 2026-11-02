@@ -252,21 +252,6 @@ func parsePair(name string) (offset int, ok bool) {
 	return a - 1, true
 }
 
-// onlyStereoPair: if exactly one of the names Live offers is a stereo pair,
-// that pair. A user who enabled one pair of the virtual card gets exactly that.
-func onlyStereoPair(options []string) (string, bool) {
-	found := ""
-	for _, o := range options {
-		if _, ok := parsePair(o); ok {
-			if found != "" {
-				return "", false
-			}
-			found = o
-		}
-	}
-	return found, found != ""
-}
-
 // routingOptions reads the names Live offered out of a bad_routing error.
 func routingOptions(e *phError) (what string, options []string) {
 	var d struct {
@@ -283,10 +268,10 @@ type tracksResult struct {
 }
 
 // ensureBraidsTracks makes the audio and the MIDI track in Live, and sets
-// their routing. channel/setChannel are Braids' own channel pair (0-based
-// offset) and the way to change it: if Live offers exactly one stereo pair on
-// the input, that is the pair the user enabled, so Braids is switched to it.
-func ensureBraidsTracks(channelOffset int, setChannelOffset func(int) error) (tracksResult, error) {
+// their routing. channelOffset is Braids' own channel pair (0-based offset).
+// It never changes that pair: if Live does not offer it, the error names the
+// pairs Live does offer.
+func ensureBraidsTracks(channelOffset int) (tracksResult, error) {
 	var res tracksResult
 	pair := pairName(channelOffset)
 	audio := map[string]any{
@@ -297,19 +282,8 @@ func ensureBraidsTracks(channelOffset int, setChannelOffset func(int) error) (tr
 	data, err := phCall("track", "ensure", audio)
 	var pe *phError
 	if errors.As(err, &pe) && pe.Code == "bad_routing" {
-		what, options := routingOptions(pe)
-		if what == "channel" {
-			if only, ok := onlyStereoPair(options); ok {
-				off, _ := parsePair(only)
-				if serr := setChannelOffset(off); serr != nil {
-					return res, fmt.Errorf("switching Braids to channels %s: %w", only, serr)
-				}
-				res.Lines = append(res.Lines, fmt.Sprintf("Braids now writes to channels %s, the pair Live offers.", only))
-				audio["input_channel"] = []string{only}
-				data, err = phCall("track", "ensure", audio)
-			} else {
-				return res, fmt.Errorf("Live does not offer channels %s on Ext. In (it offers: %s). Enable the Push Hack Virtual Audio card in Push's audio preferences, then set Braids' channel pair to match", pair, strings.Join(options, ", "))
-			}
+		if what, options := routingOptions(pe); what == "channel" {
+			return res, fmt.Errorf("Live does not offer channels %s on Ext. In (it offers: %s). Enable them in Push's audio preferences, or pick an offered pair in Braids' channel list", pair, strings.Join(options, ", "))
 		}
 	}
 	if err != nil {

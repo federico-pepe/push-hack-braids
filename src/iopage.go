@@ -85,7 +85,11 @@ type channelOption struct {
 
 func (io *ioState) buildChannelRowsLocked() []channelOption {
 	var out []channelOption
-	for ch := 0; ch+1 < loopbackChannels; ch += 2 {
+	channels := loopbackChannels
+	if n := busChannels(); n >= 2 {
+		channels = n
+	}
+	for ch := 0; ch+1 < channels; ch += 2 {
 		out = append(out, channelOption{label: fmt.Sprintf("Ch %d-%d", ch+1, ch+2), offset: ch})
 	}
 	return out

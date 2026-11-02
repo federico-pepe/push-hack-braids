@@ -80,6 +80,10 @@ The pattern used throughout: a loop that watches for a target to change (a confi
 
 - **`watchHWParams`** (`audiosession.go`) — waits for `push-audio-loopback`'s virtual card, waits for Live to actually open it, reads channels/rate/period/buffer straight off what Live negotiated, and reopens the `audioSession` whenever those change or the user picks a different output device.
 
+### Audio bus (`bus.go`)
+
+When the push-audio-loopback mixer answers on the bus socket (`core/audiobus`), `watchHWParams` plays through it: `startBusSession` renders the same way but sends float blocks to the mixer instead of writing the card, so other audio hacks can play at the same time. Without a mixer the direct path is unchanged. In bus mode the mixer owns the device and the channel pair (`getChannelOffset` returns the pair the mixer gave; `bus_pair` in `braids-config.json`, -1 = the mixer chooses). Design: `docs/audio-bus.md` in ableton-push-hack. The Makefile builds against a local `core/` until `audiobus` is tagged.
+
 ### One goroutine owns the plugin instance
 
 Braids' C++ instance state is not thread-safe. Every `bridge_plugin_*` call happens on `audioSession.run`'s single goroutine (`audiosession.go`), which drains two channels each render block:
