@@ -15,6 +15,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/federico-pepe/ableton-push-hack/core/audiobus"
+
 	"push-braids/hwparams"
 )
 
@@ -34,7 +36,9 @@ func cSetParam(plugin *C.bridge_plugin_t, key, val string) {
 // different output device, since bridge.h already separates
 // bridge_pcm_open/close from the plugin's own lifecycle.
 type audioSession struct {
-	pcm      *C.bridge_pcm_t
+	pcm      *C.bridge_pcm_t  // nil in bus mode
+	bus      *audiobus.Client // nil in direct mode
+	busGen   uint64
 	period   int
 	channels int
 	stopCh   chan struct{}
@@ -72,6 +76,26 @@ func startAudioSession(plugin *C.bridge_plugin_t, device string, hp hwparams.Par
 // stop signals the render goroutine and blocks until it has actually
 // exited and closed the PCM handle — so the caller can safely open a new
 // session against the same device right after this returns.
+// startBusSession renders into the audio mixer instead of the card. The
+// format (rate, period) is the one the mixer reports.
+func startBusSession(plugin *C.bridge_plugin_t, c *audiobus.Client,
+	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState, rt *sharedConfig,
+	level *levelMeter) *audioSession {
+
+	f := c.Format()
+	s := &audioSession{
+		bus:      c,
+		busGen:   c.Generation(),
+		period:   f.Period,
+		channels: f.Channels,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+	}
+	log.Printf("audio bus: %s on channels %d-%d, rate=%d period=%d", busName, c.Pair()+1, c.Pair()+2, f.Rate, f.Period)
+	go s.run(plugin, midiCh, ctlCh, params, io, rt, f.Rate, level)
+	return s
+}
+
 func (s *audioSession) stop() {
 	close(s.stopCh)
 	<-s.doneCh
@@ -87,7 +111,9 @@ func (s *audioSession) stop() {
 func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctlCh <-chan controlEvent,
 	params *paramState, io *ioState, rt *sharedConfig, rate int, level *levelMeter) {
 	defer close(s.doneCh)
-	defer C.bridge_pcm_close(s.pcm)
+	if s.pcm != nil {
+		defer C.bridge_pcm_close(s.pcm)
+	}
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -97,6 +123,10 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 	}
 
 	stereo := make([]int16, s.period*2)
+	var fbuf []float32 // bus mode: the block as float for the mixer
+	if s.bus != nil {
+		fbuf = make([]float32, s.period*2)
+	}
 	wide := make([]int16, s.period*s.channels)
 	budget := time.Duration(s.period) * time.Second / time.Duration(rate)
 
@@ -240,6 +270,21 @@ func (s *audioSession) run(plugin *C.bridge_plugin_t, midiCh <-chan [3]byte, ctl
 		}
 		level.set(math.Max(level.get()*meterDecay, blockPeak))
 
+		if s.bus != nil {
+			// The mixer puts the block on our pair; Write waits for room in
+			// its ring, which paces this loop to the card.
+			if s.bus.Generation() != s.busGen || !s.bus.Connected() {
+				log.Printf("audio bus: connection changed; reopening")
+				return
+			}
+			for i, v := range stereo {
+				fbuf[i] = float32(v) / 32768
+			}
+			_ = s.bus.Write(fbuf) // a dropped block is silence
+			blocks++
+			continue
+		}
+
 		for i := range wide {
 			wide[i] = 0
 		}
@@ -376,6 +421,52 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 		case <-shutdown:
 			return
 		default:
+		}
+
+		if haveSess {
+			select {
+			case <-sess.doneCh: // the session ended by itself (bus reconnect, bus lost)
+				sess, haveSess = nil, false
+			default:
+			}
+		}
+
+		if c := busClient.Load(); (c != nil && c.Connected()) || busUp() {
+			// A mixer owns the card: play through it, not through hw:.
+			if haveSess && sess.bus == nil {
+				stopSession()
+			}
+			if !busMode.Swap(true) {
+				logTransition("audio mixer found; playing through the audio bus")
+			}
+			if c == nil {
+				c = audiobus.Open(busSocket, busName, rt.getBusPair())
+				busClient.Store(c)
+			}
+			if !c.Connected() {
+				stopSession()
+				status.set(false, msgWaitingForLive)
+				if !sleepOrStop(waitPollInterval, shutdown) {
+					return
+				}
+				continue
+			}
+			if !haveSess {
+				sess = startBusSession(plugin, c, midiCh, ctlCh, params, io, rt, level)
+				haveSess = true
+				status.set(true, "")
+			}
+			if !sleepOrStop(steadyPollInterval, shutdown) {
+				return
+			}
+			continue
+		}
+		if busMode.Swap(false) {
+			stopSession()
+			if c := busClient.Swap(nil); c != nil {
+				c.Close()
+			}
+			logTransition("audio mixer gone; playing to the card directly")
 		}
 
 		if !cardPresent(cardID) {

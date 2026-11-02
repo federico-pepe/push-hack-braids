@@ -14,6 +14,7 @@ type sharedConfig struct {
 	midiPort       byte
 	pcmDevice      string
 	channelOffset  int
+	busPair        int
 	pushManagerURL string
 }
 
@@ -23,6 +24,7 @@ func newSharedConfig(cfg persistedConfig) *sharedConfig {
 		midiPort:       cfg.MidiPort,
 		pcmDevice:      cfg.PCMDevice,
 		channelOffset:  cfg.ChannelOffset,
+		busPair:        cfg.BusPair,
 		pushManagerURL: cfg.PushManagerURL,
 	}
 }
@@ -51,7 +53,12 @@ func (s *sharedConfig) setPCM(device string) {
 	s.pcmDevice = device
 }
 
+// getChannelOffset is the first channel of the pair Braids plays on: the pair
+// the mixer gave us in bus mode, the configured one otherwise.
 func (s *sharedConfig) getChannelOffset() int {
+	if busConnected() {
+		return busClient.Load().Pair()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.channelOffset
@@ -59,8 +66,18 @@ func (s *sharedConfig) getChannelOffset() int {
 
 func (s *sharedConfig) setChannelOffset(offset int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.channelOffset = offset
+	s.busPair = offset
+	s.mu.Unlock()
+	if c := busClient.Load(); c != nil {
+		c.SetPair(offset)
+	}
+}
+
+func (s *sharedConfig) getBusPair() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busPair
 }
 
 // snapshot returns the current values as a persistedConfig, ready to save.
@@ -72,6 +89,7 @@ func (s *sharedConfig) snapshot() persistedConfig {
 		MidiPort:       s.midiPort,
 		PCMDevice:      s.pcmDevice,
 		ChannelOffset:  s.channelOffset,
+		BusPair:        s.busPair,
 		PushManagerURL: s.pushManagerURL,
 	}
 }

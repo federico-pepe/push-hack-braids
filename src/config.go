@@ -30,6 +30,9 @@ type persistedConfig struct {
 	// channels 3-4). Defaults to 0 (channels 1-2), this hack's original
 	// hardcoded behavior.
 	ChannelOffset int `json:"channel_offset"`
+	// BusPair is the pair asked of the audio mixer, or -1 to let the mixer
+	// choose and remember one.
+	BusPair int `json:"bus_pair"`
 	// PushManagerURL overrides the default http://localhost:7701 — for
 	// development only; never set by the on-screen picker.
 	PushManagerURL string `json:"push_manager_url,omitempty"`
@@ -41,6 +44,7 @@ func defaultConfig() persistedConfig {
 		MidiPort:      alsaseq.Push3PortDefault,
 		PCMDevice:     "hw:PHVAudio,1,0",
 		ChannelOffset: 0,
+		BusPair:       -1,
 	}
 }
 

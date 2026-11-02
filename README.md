@@ -49,9 +49,9 @@ release tarball, so a catalog install needs no manual step.
    - **Braids**: an audio track, input `Ext. In` on the card's pair, monitor In,
      output Main. Its meter drives the Volume fader on Push's screen.
    - **Braids MIDI**: a MIDI track, input All Ins, output **Braids MIDI In**.
-   If Live offers exactly one stereo pair, Braids switches its own channel pair to
-   it. If Live offers several, the page lists them and asks you to set the pair in
-   Braids' I/O settings to match.
+   Braids keeps the channel pair you chose. If Live does not offer that pair, the page
+   lists the pairs Live offers: enable your pair in Push's audio preferences, or pick
+   an offered pair in Braids' channel list.
 3. Select the **Braids MIDI** track and press the pads. Braids plays only while that
    track is selected, so pads on your other tracks do not trigger it.
 
@@ -83,7 +83,8 @@ scrollable list to pick:
 
 - **MIDI INPUT** — which of Push3's own three MIDI ports to read
   pad/button presses from (normally "Live Port", the default).
-- **AUDIO OUTPUT** — which playback device on the system to render to.
+- **AUDIO OUTPUT** — which playback device on the system to render to. It has
+  no effect while the audio mixer runs (see "Audio mixer").
 - **AUDIO CHANNEL** — which channel pair of that device (1-2, 3-4, ...)
   the stereo signal lands on, so it can line up with whatever channel
   pair Live's own track is set to read from.
@@ -96,6 +97,21 @@ port, so picking another MIDI input never breaks them; it only changes which
 pad presses play Braids (see "Set up in Live"). If something goes wrong, edit
 `/data/push-hack/hacks/push-braids/braids-config.json` over SSH and restart the
 service.
+
+## Audio mixer
+
+Braids plays through the audio mixer of
+[push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)
+when it runs. The mixer adds the audio of all audio hacks, so Braids and
+MachineModule can play at the same time. The mixer owns the card and the channel
+pair (the mixer remembers it; `bus_pair` in `braids-config.json`, -1 lets the
+mixer choose). Without the mixer, Braids writes to the card itself, and only one
+audio hack can do that at a time. The Settings section of the web page shows the
+active mode. In both modes Live needs an audio track that listens to the pair.
+
+The design is in
+[docs/audio-bus.md](https://github.com/federico-pepe/ableton-push-hack/blob/main/docs/audio-bus.md)
+in the main Push Hack repository.
 
 ## Persistent install
 
