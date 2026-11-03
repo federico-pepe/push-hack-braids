@@ -56,7 +56,7 @@ func (io *ioState) buildMIDIRowsLocked() []midiOptions {
 	ports, _ := alsaseq.EnumPorts(alsaseq.CapRead)
 	var out []midiOptions
 	for _, p := range ports {
-		if p.Addr.Client != alsaseq.Push3ClientDefault {
+		if !pushLive.Is(p.Addr) {
 			continue
 		}
 		out = append(out, midiOptions{label: p.PortName, port: p})

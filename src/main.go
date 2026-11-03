@@ -143,13 +143,13 @@ type controlEvent struct {
 }
 
 func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
-	fromPush3 := src.Client == alsaseq.Push3ClientDefault
+	fromPush3 := pushLive.Is(src)
 
 	if evType == alsaseq.EvController {
 		// Only Push3's own default port drives the on-screen controls —
 		// merging everything onto one port means CC could otherwise arrive
 		// from any external client connected to it too.
-		if !fromPush3 || src.Port != alsaseq.Push3PortDefault {
+		if !pushLive.IsLivePort(src) {
 			return
 		}
 		// Push's own control-surface CCs (encoders, D-Pad, screen buttons)
@@ -212,7 +212,7 @@ func (h *midiHandler) Fixed(evType uint8, src alsaseq.Addr, data []byte) {
 		// Which of Push3's own notes may play: see acceptPushNote.
 		curClient, curPort := h.rt.getMIDI()
 		configured := src.Client == curClient && src.Port == curPort
-		livePort := src.Port == alsaseq.Push3PortDefault
+		livePort := pushLive.IsLivePort(src)
 		if !acceptPushNote(configured, livePort, uiIsOn(), data[1]) {
 			return
 		}

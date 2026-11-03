@@ -1,6 +1,10 @@
 package main
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/federico-pepe/ableton-push-hack/core/alsaseq"
+)
 
 // sharedConfig is persistedConfig's live, in-memory counterpart: the
 // values watchBraidsPort/watchHWParams actually act on, and the on-screen I/O
@@ -32,12 +36,20 @@ func newSharedConfig(cfg persistedConfig) *sharedConfig {
 func (s *sharedConfig) getMIDI() (client, port byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.midiClient, s.midiPort
+	client = s.midiClient
+	if client == alsaseq.Push3ClientDefault {
+		// Saved as the default: Push 3, at its client number now.
+		client = pushLive.Addr().Client
+	}
+	return client, s.midiPort
 }
 
 func (s *sharedConfig) setMIDI(client, port byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if client == pushLive.Addr().Client {
+		client = alsaseq.Push3ClientDefault // keep "Push 3" stable when its number moves
+	}
 	s.midiClient, s.midiPort = client, port
 }
 
