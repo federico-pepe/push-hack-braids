@@ -31,8 +31,6 @@ const braidsMIDIPortName = "Braids MIDI In"
 // midiHandler.Fixed decides what's "current" by content, not by which
 // subscription delivered it. Runs until shutdown fires.
 func watchBraidsPort(rt *sharedConfig, handler alsaseq.Handler, shutdown <-chan struct{}) {
-	pinned := alsaseq.Addr{Client: alsaseq.Push3ClientDefault, Port: alsaseq.Push3PortDefault}
-
 	var seq *alsaseq.Client
 	haveSeq := false
 	subscribed := map[alsaseq.Addr]bool{}
@@ -65,8 +63,13 @@ func watchBraidsPort(rt *sharedConfig, handler alsaseq.Handler, shutdown <-chan 
 			seq = newSeq
 			haveSeq = true
 			log.Printf("%s port open — external MIDI gear or Live can connect to it directly", braidsMIDIPortName)
+		}
+
+		// Push 3's number moves with the sound cards: look it up on every
+		// pass, so a failed subscribe is retried at the right address.
+		if pinned := pushLive.Refresh(); !subscribed[pinned] {
 			if err := seq.Subscribe(pinned); err != nil {
-				log.Printf("subscribing %s to Push3 %v: %v", braidsMIDIPortName, pinned, err)
+				log.Printf("subscribing %s to Push3 %v: %v — will retry", braidsMIDIPortName, pinned, err)
 			} else {
 				subscribed[pinned] = true
 				log.Printf("subscribed %s to %v for on-screen control surface", braidsMIDIPortName, pinned)

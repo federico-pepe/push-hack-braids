@@ -42,7 +42,7 @@ func acceptPushNote(configured, livePort, appOpen bool, note byte) bool {
 
 // padsModeOf names the mode for the MIDI input in use.
 func padsModeOf(client, port byte) string {
-	if client == alsaseq.Push3ClientDefault && port == alsaseq.Push3PortDefault {
+	if (alsaseq.Addr{Client: client, Port: port}) == pushLive.Addr() {
 		return padsAlways
 	}
 	return padsApp

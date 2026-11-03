@@ -74,7 +74,7 @@ The pattern used throughout: a loop that watches for a target to change (a confi
 
 - **`watchMIDI`** (`midisession.go`) — runs the loop **twice**, for two separate ALSA seq subscriptions:
   1. One retargets to whatever the I/O picker's MIDI-input choice is (`sharedConfig`), and only ever carries **note** events (pad presses) into the plugin.
-  2. One is permanently pinned to Push 3's own port (`alsaseq.Push3ClientDefault`/`Push3PortDefault`) and only ever carries **control-surface** events (encoders, D-Pad, screen buttons).
+  2. One is permanently subscribed to Push 3's own Live Port, looked up by name with `alsaseq.Push3` (`pushLive`, `pushlive.go`) before every subscribe attempt: its client is 16 only while Push 3 is ALSA card 0, and 20 when the loopback card is card 0. Never pin `Push3ClientDefault`; the saved `midi_client` 16 means "Push 3, wherever it is" (`sharedConfig.getMIDI`) and only ever carries **control-surface** events (encoders, D-Pad, screen buttons).
 
   This split matters: the two kinds of event used to share one subscription, so picking a MIDI input other than Push 3's own port also broke the on-screen encoders/buttons. `main.go`'s `notesOnlyHandler`/`controlsOnlyHandler` wrap the shared `midiHandler` to gate which events each subscription is allowed to feed it — the actual channel/note-range filtering logic in `midiHandler.Fixed` is unchanged and shared by both.
 
@@ -82,7 +82,7 @@ The pattern used throughout: a loop that watches for a target to change (a confi
 
 ### Audio bus (`bus.go`)
 
-When the push-audio-loopback mixer answers on the bus socket (`core/audiobus`), `watchHWParams` plays through it: `startBusSession` renders the same way but sends float blocks to the mixer instead of writing the card, so other audio hacks can play at the same time. Without a mixer the direct path is unchanged. In bus mode the mixer owns the device and the channel pair (`getChannelOffset` returns the pair the mixer gave; `bus_pair` in `braids-config.json`, -1 = the mixer chooses). Design: `docs/audio-bus.md` in ableton-push-hack. `audiobus` comes from `core/v0.5.3`.
+When the push-audio-loopback mixer answers on the bus socket (`core/audiobus`), `watchHWParams` plays through it: `startBusSession` renders the same way but sends float blocks to the mixer instead of writing the card, so other audio hacks can play at the same time. Without a mixer the direct path is unchanged. In bus mode the mixer owns the device and the channel pair (`getChannelOffset` returns the pair the mixer gave; `bus_pair` in `braids-config.json`, -1 = the mixer chooses). Design: `docs/audio-bus.md` in ableton-push-hack. `audiobus` and `alsaseq.Push3` come from `core/v0.5.4`.
 
 ### One goroutine owns the plugin instance
 
