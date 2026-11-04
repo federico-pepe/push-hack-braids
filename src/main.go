@@ -12,7 +12,7 @@
 // this binary is fully config/file driven: no CLI flags for the PCM
 // device, channels, rate, or buffer size. Channels/rate/period/buffer are
 // negotiated live from whatever Live's own audio track actually opened
-// (see hwparams/), not set by a human.
+// (see core/alsapcm ReadHWParams), not set by a human.
 package main
 
 /*
