@@ -17,7 +17,7 @@ import (
 
 	"github.com/federico-pepe/ableton-push-hack/core/audiobus"
 
-	"push-braids/hwparams"
+	"github.com/federico-pepe/ableton-push-hack/core/alsapcm"
 )
 
 // cSetParam is bridge_plugin_set_param's CString/free boilerplate, shared
@@ -48,7 +48,7 @@ type audioSession struct {
 // startAudioSession opens the PCM device and starts its dedicated render
 // goroutine. rate is passed separately from hp because the caller decides
 // which rate to request; in practice it is always hp.Rate.
-func startAudioSession(plugin *C.bridge_plugin_t, device string, hp hwparams.Params,
+func startAudioSession(plugin *C.bridge_plugin_t, device string, hp alsapcm.HWParams,
 	midiCh <-chan [3]byte, ctlCh <-chan controlEvent, params *paramState, io *ioState, rt *sharedConfig,
 	level *levelMeter) (*audioSession, error) {
 
@@ -394,7 +394,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 	status *audioStatus, level *levelMeter, shutdown <-chan struct{}) {
 
 	var sess *audioSession
-	var lastParams hwparams.Params
+	var lastParams alsapcm.HWParams
 	var lastDevice string
 	haveSess := false
 	lastState := ""
@@ -479,7 +479,7 @@ func watchHWParams(cardID string, rt *sharedConfig, plugin *C.bridge_plugin_t,
 			continue
 		}
 
-		hp, ok, err := hwparams.Read(cardID)
+		hp, ok, err := alsapcm.ReadHWParams(cardID)
 		if err != nil {
 			log.Printf("reading hw_params for %s: %v", cardID, err)
 			status.set(false, msgWaitingForLive)
