@@ -5,8 +5,8 @@ Ableton Push 3. A standalone DSP host: takes notes from a MIDI track in Live
 (or from Push3's pads while its app is open), feeds them into a Move Anything `plugin_api_v2`
 DSP module — Braids, the macro oscillator by Emilie Gillet (Mutable
 Instruments), ported from Schwung DSP — and writes the rendered audio into
-[push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)'s
-virtual sound card.
+[push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)
+(over Ableton Link Audio, or through its virtual sound card).
 
 Has an on-screen control UI for Braids' own parameters, and an on-screen
 picker for which MIDI port / audio device / channel pair to use — see
@@ -42,8 +42,9 @@ release tarball, so a catalog install needs no manual step.
 
 ## Set up in Live
 
-1. In Push's audio preferences, enable the **Push Hack Virtual Audio** card (one
-   stereo input pair, for example 3/4).
+1. In Live, turn on **Link** and **Link Audio** (the default; see "Link Audio" below). With the
+   virtual card instead: in Push's audio preferences, enable the **Push Hack Virtual Audio** card
+   (one stereo input pair, for example 3/4).
 2. Open Braids' web page (Push Hack Catalog, or `http://push.local:7712`) and press
    **Create the Braids tracks in Live**. It makes two tracks and sets their routing:
    - **Braids**: an audio track, input `Ext. In` on the card's pair, monitor In,
@@ -98,7 +99,23 @@ pad presses play Braids (see "Set up in Live"). If something goes wrong, edit
 `/data/push-hack/hacks/push-braids/braids-config.json` over SSH and restart the
 service.
 
+## Link Audio (default)
+
+push-audio-loopback 0.3.0-alpha sends the audio of Braids to Live over Ableton Link Audio. This is its default.
+Braids is then its own Link channel, named `Braids`, and Live keeps the sound card of the Push as its output.
+
+1. In Live, turn on **Link** and **Link Audio**. Live switches them off after a restart.
+2. Give an audio track the input type **PushHack**, pick the channel `Braids`, and set Monitor to In.
+3. The Audio page of push-audio-loopback (Push Hack menu, *Audio*) switches between Link and the virtual card.
+
+- The channel pair does not matter in Link mode.
+- The *Create the Braids tracks in Live* button still makes the **Braids** audio track on the virtual card. In Link mode give that track the input type `PushHack` and pick `Braids`.
+- The *Create tracks in Live* button still makes the audio track on the virtual card. In Link mode, set the input of that track by hand as in step 2.
+- After a restart of push-audio-loopback, Braids can drift against the clock of Live. Press play in Live and it is back in time. This is a known issue.
+
 ## Audio mixer
+
+This section is about the virtual card mode.
 
 Braids plays through the audio mixer of
 [push-hack-audio-loopback](https://github.com/federico-pepe/push-hack-audio-loopback)
