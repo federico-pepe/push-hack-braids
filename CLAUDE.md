@@ -113,3 +113,5 @@ The PATCH page (preset + octave transpose) gets its own full-screen scrollable l
 ### Vendored DSP source
 
 `third_party/braids/` is vendored MIT-licensed C++ (Mutable Instruments' Braids, via a Move Anything port) — see its own `THIRD_PARTY_LICENSES.md`. It has no ARM-specific code, so `dsp.so` builds as native x86_64, no cross toolchain needed.
+
+- push-audio-loopback 0.3.0-alpha sends the bus audio to Live over Ableton Link Audio by default (a Link channel named `Braids`); the code here does not change. *Create the Braids tracks in Live* still makes the audio track on the virtual card, so in Link mode the user sets the `PushHack` input by hand. Known issue: the render loop ends when the bus disconnects, so after a restart of push-audio-loopback the sequencing can drift against the clock of Live (not checked in Braids). Press play in Live.
