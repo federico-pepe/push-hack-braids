@@ -61,7 +61,7 @@ func (ws *webServer) buildState() map[string]any {
 			"device":  ws.io.DeviceOptions(),
 			"channel": ws.io.ChannelOptions(),
 		},
-		"audio": map[string]any{"ready": ready, "message": msg, "bus": busMode.Load()},
+		"audio": map[string]any{"ready": ready, "message": msg, "bus": busMode.Load(), "link": linkMode()},
 		"pads":  ws.io.PadsMode(),
 	}
 }
@@ -163,7 +163,7 @@ func (ws *webServer) handlePads(w http.ResponseWriter, r *http.Request) {
 // Live, with their routing (see pushhack.go). It changes the user's Set, so it
 // only runs when the user presses the button.
 func (ws *webServer) handleLiveTracks(w http.ResponseWriter, r *http.Request) {
-	res, err := ensureBraidsTracks(ws.io.rt.getChannelOffset())
+	res, err := ensureBraidsTracks(ws.io.rt.getChannelOffset(), !linkMode())
 	if err != nil {
 		log.Printf("live tracks: %v", err)
 		httpx.JSON(w, map[string]any{"ok": false, "error": err.Error(), "lines": res.Lines})

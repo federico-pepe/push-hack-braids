@@ -108,9 +108,7 @@ Braids is then its own Link channel, named `Braids`, and Live keeps the sound ca
 2. Give an audio track the input type **PushHack**, pick the channel `Braids`, and set Monitor to In.
 3. The Audio page of push-audio-loopback (Push Hack menu, *Audio*) switches between Link and the virtual card.
 
-- The channel pair does not matter in Link mode.
-- The *Create the Braids tracks in Live* button still makes the **Braids** audio track on the virtual card. In Link mode give that track the input type `PushHack` and pick `Braids`.
-- The *Create tracks in Live* button still makes the audio track on the virtual card. In Link mode, set the input of that track by hand as in step 2.
+- In Link mode the web page hides the audio settings (audio output, channel pair): they do not matter. The *Create the Braids tracks in Live* button then reads *Create the Braids MIDI track in Live* and makes only the MIDI track. Set the input of the audio track by hand as in step 2.
 - After a restart of push-audio-loopback, Braids can drift against the clock of Live. Press play in Live and it is back in time. This is a known issue.
 
 ## Audio mixer
