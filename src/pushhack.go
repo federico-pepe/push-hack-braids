@@ -271,8 +271,19 @@ type tracksResult struct {
 // their routing. channelOffset is Braids' own channel pair (0-based offset).
 // It never changes that pair: if Live does not offer it, the error names the
 // pairs Live does offer.
-func ensureBraidsTracks(channelOffset int) (tracksResult, error) {
+// withAudio is false in Link mode: the audio track there takes the PushHack
+// input, which the user sets in Live.
+func ensureBraidsTracks(channelOffset int, withAudio bool) (tracksResult, error) {
 	var res tracksResult
+	if withAudio {
+		if err := ensureAudioTrack(&res, channelOffset); err != nil {
+			return res, err
+		}
+	}
+	return ensureMIDITrack(res)
+}
+
+func ensureAudioTrack(res *tracksResult, channelOffset int) error {
 	pair := pairName(channelOffset)
 	audio := map[string]any{
 		"kind": "audio", "name": braidsAudioTrack,
@@ -283,16 +294,19 @@ func ensureBraidsTracks(channelOffset int) (tracksResult, error) {
 	var pe *phError
 	if errors.As(err, &pe) && pe.Code == "bad_routing" {
 		if what, options := routingOptions(pe); what == "channel" {
-			return res, fmt.Errorf("Live does not offer channels %s on Ext. In (it offers: %s). Enable them in Push's audio preferences, or pick an offered pair in Braids' channel list", pair, strings.Join(options, ", "))
+			return fmt.Errorf("Live does not offer channels %s on Ext. In (it offers: %s). Enable them in Push's audio preferences, or pick an offered pair in Braids' channel list", pair, strings.Join(options, ", "))
 		}
 	}
 	if err != nil {
-		return res, friendlyPHError("audio track", err)
+		return friendlyPHError("audio track", err)
 	}
 	a := parseEnsure(data)
 	res.Lines = append(res.Lines, trackLine(braidsAudioTrack, a.Created))
+	return nil
+}
 
-	data, err = phCall("track", "ensure", map[string]any{
+func ensureMIDITrack(res tracksResult) (tracksResult, error) {
+	data, err := phCall("track", "ensure", map[string]any{
 		"kind": "midi", "name": braidsMIDITrack,
 		"input_type": "All Ins", "output_type": "Braids MIDI In",
 	})

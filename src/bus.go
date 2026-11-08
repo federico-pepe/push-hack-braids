@@ -19,7 +19,12 @@ var (
 	busSocket = audiobus.SocketPath(audiobus.DefaultDir)
 	busClient atomic.Pointer[audiobus.Client]
 	busMode   atomic.Bool // the mixer is in use
+	linkProbe = audiobus.NewLinkProbe()
 )
+
+// linkMode says the mixer sends audio to Live over Link. Then the card input
+// the Create tracks button sets is wrong, so the page hides the audio setup.
+func linkMode() bool { return busMode.Load() && linkProbe.Link() }
 
 // busUp says whether a mixer answers on the bus socket.
 func busUp() bool {
